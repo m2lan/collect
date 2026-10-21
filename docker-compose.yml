@@ -1,0 +1,52 @@
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+asyncpg://collect:${POSTGRES_PASSWORD:-collect}@postgres:5432/collect
+  REDIS_URL: redis://redis:6379
+  SECRET_KEY: ${SECRET_KEY:?请在 .env 中设置 SECRET_KEY}
+  ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: collect
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-collect}
+      POSTGRES_DB: collect
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U collect"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    environment: *backend-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: arq app.worker.WorkerSettings
+    environment: *backend-env
+    depends_on:
+      api: { condition: service_started }
+    shm_size: 1gb
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on: [api]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
