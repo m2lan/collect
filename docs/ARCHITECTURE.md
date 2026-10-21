@@ -1,4 +1,4 @@
-# 拍卖价格采集平台 — 架构方案（v0.2）
+# 拍卖价格采集平台 — 架构方案（v1.0，已全部实现）
 
 ## 1. 目标与范围
 
@@ -251,53 +251,62 @@ Scheduler/手动 ──► 投递 crawl_job(source_id) ──► Worker
 
 ## 7. 稳定性与合规
 
-- 限速：按 source 令牌桶（Redis），默认 1 req/s；随机 UA；可选代理池。
+- 限速：同一站点同时只允许一个采集任务（创建任务与调度时检查），任务内按站点 rate_limit 控制请求间隔（默认 1 req/s）；随机 UA；可选代理池（站点级开关，每次采集随机选择）。
+- 重试：单个请求失败自动重试 3 次（指数退避）；首页抽取不到数据时在采集日志中保存页面片段便于排查。
 - 登录态（站点级配置，平台不固定，按需选择）：
   - `none`：无需登录；
   - `cookie`：粘贴浏览器中的 Cookie（支持 `a=b; c=d` 字符串或浏览器插件导出的 JSON 数组），适用于有验证码/短信登录的平台；
   - `form`：配置登录页 URL、账号、密码及输入框/按钮选择器，由 Playwright 自动登录，保存 storage_state 复用；
     检测到登录失效（配置的"已登录标志"元素不存在或跳转到登录页）时自动重新登录一次。
   - 凭据全部加密存储，接口不回显明文。
-- 规则失效检测：连续 N 次抽取 0 条 / 关键字段为空率过高 → 标记告警；AI 已开启且允许自动修复时，自动生成新规则并直接启用。
+- 规则失效检测：连续 N 次采集失败 → 失效（broken）并通过企业微信/钉钉/飞书/通用 Webhook 告警；关键字段空值率过高 → 异常（warning）；AI 已开启且允许自动修复时，自动生成新规则并直接启用。
 - 合规：尊重目标站 robots 与服务条款，仅采集公开信息，控制频率。
 
-## 8. 目录结构（规划）
+## 8. 目录结构
 
 ```
 collect/
 ├── backend/
 │   ├── app/
-│   │   ├── api/            # FastAPI 路由
-│   │   ├── models/         # SQLAlchemy 模型
-│   │   ├── schemas/        # Pydantic 模型（含规则 schema 校验）
+│   │   ├── api/                # FastAPI 路由：auth / sources(含预览、快照、嗅探) / lots(含导出) / runs / ai / settings / templates
+│   │   ├── models/entities.py  # SQLAlchemy 模型
+│   │   ├── schemas/            # rule.py 规则 Schema（校验 AI 与人工规则）、api.py 接口模型
 │   │   ├── crawler/
-│   │   │   ├── fetchers/   # static / browser / api
-│   │   │   ├── extractor.py
-│   │   │   ├── transforms.py
-│   │   │   └── pipeline.py
+│   │   │   ├── fetchers/       # static(httpx，含 api 模式) / browser(Playwright，含登录、截图、XHR 捕获)
+│   │   │   ├── extractor.py    # CSS / XPath / 正则 / JSONPath 抽取，详情页抽取
+│   │   │   ├── transforms.py   # 金额、时间、状态等转换
+│   │   │   ├── pipeline.py     # 标准化、去重 upsert、价格快照
+│   │   │   ├── runner.py       # 采集执行（翻页、重试、详情页、盯价、日志）
+│   │   │   ├── health.py       # 规则健康检查
+│   │   │   ├── sniff.py        # 接口嗅探与字段猜测
+│   │   │   └── snapshot.py     # 可视化选取器的页面快照
 │   │   ├── ai/
-│   │   │   ├── providers/  # base.py / openai_provider.py / anthropic_provider.py
-│   │   │   ├── html_compress.py  # 页面清洗与压缩
+│   │   │   ├── providers/      # base.py / openai_provider.py / anthropic_provider.py
+│   │   │   ├── html_compress.py
 │   │   │   ├── prompts.py
-│   │   │   └── rule_generator.py # 生成 → 校验 → 试跑 → 修正循环
-│   │   ├── worker.py       # arq worker
-│   │   └── scheduler.py
-│   ├── alembic/            # 数据库迁移
-│   └── tests/
-├── frontend/               # Vue3 + Vite + Element Plus + ECharts
-├── docker-compose.yml
+│   │   │   ├── rule_generator.py  # 生成 → 校验 → 试跑 → 修正循环
+│   │   │   ├── service.py      # 模型选择、开关、每日上限、调用记录
+│   │   │   └── repair.py       # 规则失效自动修复
+│   │   ├── notify.py           # 告警 Webhook
+│   │   ├── scheduler.py        # 定时调度（独立进程或随 API 启动）
+│   │   ├── tasks.py / worker.py  # 任务投递 / arq worker
+│   │   └── main.py
+│   ├── alembic/                # 数据库迁移
+│   └── tests/                  # 单元 + 集成测试（本地模拟拍卖站、模拟代理、假模型）
+├── frontend/                   # Vue3 + Vite + Element Plus + ECharts
+├── docker-compose.yml          # web / api / worker / scheduler / postgres / redis
 └── docs/
 ```
 
-## 9. 迭代计划
+## 9. 迭代计划（全部完成）
 
-| 阶段 | 内容 | 产出 |
+| 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| M1 MVP | 站点 CRUD、JSON 规则、static+browser 抓取、手动触发、拍品列表 | 能添加链接→配置规则→抓取→列表展示 |
-| M1.5 AI | 模型配置（openai/anthropic 协议）、AI 开关、AI 生成规则 + 试跑 + 自我修正 | 只给网址即可生成规则 |
-| M2 | 可视化选取器、规则试跑、翻页、定时调度、采集日志 | 非技术用户可配置 |
-| M3 | 价格历史与曲线、盯价任务、导出、规则失效告警 | 价格跟踪 |
-| M4 | 详情页、API 模式与 XHR 嗅探、代理池、规则模板库、AI 自动修复失效规则、截图多模态辅助 | 覆盖更多平台 |
+| M1 MVP | 站点 CRUD、JSON 规则、static+browser 抓取、三种登录方式、手动触发、拍品列表 | ✅ |
+| M1.5 AI | 模型配置（openai/anthropic 协议）、AI 开关与每日上限、AI 生成规则 + 试跑 + 自我修正、AI 一键添加站点 | ✅ |
+| M2 | 可视化选取器、规则试跑、翻页、定时调度、采集日志 | ✅ |
+| M3 | 价格历史与曲线、导出 Excel/CSV、规则失效检测与告警通知 | ✅ |
+| M4 | 详情页、API 模式与接口嗅探、代理池与随机 UA、规则模板、盯价任务、AI 自动修复失效规则、截图多模态辅助 | ✅ |
 
 ## 10. 已确认决策
 

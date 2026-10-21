@@ -49,6 +49,7 @@ async def test_health_alert_and_auto_repair(client, server, webhook, monkeypatch
     src = (await client.post("/api/sources", json={"name": "会改版的站", "start_url": f"{server}/list", "rate_limit": 20, "rule": BROKEN})).json()
     r1 = await crawl_once(client, src["id"])
     assert r1["status"] == "failed"
+    assert any(e["msg"].startswith("页面片段") and "lot-item" in e["msg"] for e in r1["log"])
     s = (await client.get(f"/api/sources/{src['id']}")).json()
     assert s["health"] == "warning" and not received
 

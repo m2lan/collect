@@ -135,6 +135,12 @@ async def crawl(
             if not page.items:
                 if result.pages > 1:
                     runlog.info("该页没有拍品，停止翻页")
+                else:
+                    # 首页就抽不到数据时保存页面片段，便于判断是改版、被拦截还是未登录
+                    from app.ai.html_compress import compress_html
+
+                    snippet = fetched.html[:1500] if config.fetch.mode == "api" else compress_html(fetched.html, 1500)
+                    runlog.warn(f"页面片段（{fetched.url}）：{snippet}")
                 break
             if page.next_url and f"{page.next_url}|None" not in seen:
                 queue.append((page.next_url, None))
