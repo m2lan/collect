@@ -1,4 +1,4 @@
-# 拍卖价格采集平台 — 架构方案（v0.1 草案）
+# 拍卖价格采集平台 — 架构方案（v0.2）
 
 ## 1. 目标与范围
 
@@ -10,7 +10,7 @@
 | 采集执行 | 手动触发 + 定时调度；失败重试、限速、日志 |
 | 数据展示 | 拍品列表（筛选/排序/搜索/导出），价格历史曲线，采集记录 |
 
-非目标（首期不做）：登录验证码破解、分布式大规模爬取、多租户计费。
+非目标（首期不做）：自动破解验证码、分布式大规模爬取、多用户/多角色权限（首期仅超级管理员）、本地模型接入。
 
 ## 2. 总体架构
 
@@ -112,7 +112,7 @@
   6. 自我修正（最多 3 轮）：抽取 0 条、关键字段（标题/价格）空值率高、价格无法解析时，
      把错误信息 + 实际抽取样本回传给 LLM 修正
   7. 返回前端：规则 + 试跑结果表格 + AI 说明（每个字段为什么这样选）
-  8. 用户确认 → 保存为新规则版本（origin=ai）
+  8. 试跑通过即保存为新规则版本并启用（origin=ai）；管理员可继续微调或回滚
 ```
 
 #### 触发场景
@@ -121,7 +121,7 @@
 | --- | --- |
 | 新建站点 | 添加 URL 时勾选"AI 生成规则"，替代可视化选取器的手工操作 |
 | 自然语言补充 | 用户可附加说明，如"还要抓保证金和围观人数"、"只要已成交的" |
-| 规则失效修复 | 失效检测触发后，可配置自动调用 AI 重新生成，生成结果进入"待审核"，不直接上线 |
+| 规则失效修复 | 失效检测触发后，可配置自动调用 AI 重新生成；试跑通过即直接启用为新版本（无审核环节，可一键回滚到旧版本） |
 | 优先选接口 | 若嗅探到返回拍品数据的 JSON 接口，AI 优先生成 `api` 模式规则（更稳定） |
 
 #### 开关粒度
@@ -144,7 +144,7 @@ class LLMProvider(Protocol):
 
 | 协议 | 实现 | 可接入的模型示例 |
 | --- | --- | --- |
-| `openai` | 官方 `openai` SDK，`/v1/chat/completions`，可配 `base_url` | OpenAI、DeepSeek、通义千问、Kimi、智谱、豆包、Ollama/vLLM 本地模型、各类中转 |
+| `openai` | 官方 `openai` SDK，`/v1/chat/completions`，可配 `base_url` | OpenAI、DeepSeek、通义千问、Kimi、智谱、豆包、Gemini（OpenAI 兼容端点）、各类中转 |
 | `anthropic` | 官方 `anthropic` SDK，`/v1/messages`，可配 `base_url` | Claude 系列、兼容 Anthropic 协议的服务 |
 
 结构化输出策略（按能力降级）：
@@ -185,12 +185,16 @@ class LLMProvider(Protocol):
 
 ```
 source            站点/采集源
-  id, name, base_url, start_url, fetch_mode, headers(JSONB), cookies(加密),
-  rate_limit(每秒请求数), enabled, created_at
+  id, name, start_url, fetch_mode, headers(JSONB),
+  auth_type(none/cookie/form), auth_config(加密 JSON: cookies / 登录表单配置),
+  storage_state(加密, 登录后的浏览器状态), rate_limit(每秒请求数), enabled, created_at
+
+user              管理员账号（首期仅超级管理员，启动时按环境变量初始化）
+  id, username, password_hash, is_superuser, created_at
 
 rule              采集规则（版本化）
   id, source_id, version, config(JSONB, 见 3.1), is_active,
-  origin(manual/visual/ai), status(draft/pending_review/active), created_at
+  origin(manual/visual/ai), note, created_at          -- 同一 source 仅一个 is_active
 
 llm_provider      AI 模型配置（见 3.4）
   id, name, protocol(openai/anthropic), base_url, api_key(加密), model,
@@ -248,8 +252,13 @@ Scheduler/手动 ──► 投递 crawl_job(source_id) ──► Worker
 ## 7. 稳定性与合规
 
 - 限速：按 source 令牌桶（Redis），默认 1 req/s；随机 UA；可选代理池。
-- 登录态：支持粘贴 Cookie（加密存储），或 Playwright 保存的 storage_state。
-- 规则失效检测：连续 N 次抽取 0 条 / 关键字段为空率过高 → 标记告警；AI 已开启且允许自动修复时，生成待审核的新规则。
+- 登录态（站点级配置，平台不固定，按需选择）：
+  - `none`：无需登录；
+  - `cookie`：粘贴浏览器中的 Cookie（支持 `a=b; c=d` 字符串或浏览器插件导出的 JSON 数组），适用于有验证码/短信登录的平台；
+  - `form`：配置登录页 URL、账号、密码及输入框/按钮选择器，由 Playwright 自动登录，保存 storage_state 复用；
+    检测到登录失效（配置的"已登录标志"元素不存在或跳转到登录页）时自动重新登录一次。
+  - 凭据全部加密存储，接口不回显明文。
+- 规则失效检测：连续 N 次抽取 0 条 / 关键字段为空率过高 → 标记告警；AI 已开启且允许自动修复时，自动生成新规则并直接启用。
 - 合规：尊重目标站 robots 与服务条款，仅采集公开信息，控制频率。
 
 ## 8. 目录结构（规划）
@@ -290,10 +299,13 @@ collect/
 | M3 | 价格历史与曲线、盯价任务、导出、规则失效告警 | 价格跟踪 |
 | M4 | 详情页、API 模式与 XHR 嗅探、代理池、规则模板库、AI 自动修复失效规则、截图多模态辅助 | 覆盖更多平台 |
 
-## 10. 待确认问题
+## 10. 已确认决策
 
-1. 目标拍卖平台有哪些（如阿里拍卖、京东拍卖、雅昌、海外 eBay/Yahoo 等）？是否需要登录？
-2. 部署方式：单机 docker-compose 是否满足？预计站点数量与采集频率？
-3. 技术栈偏好：后端 Python 是否可以？前端 Vue 还是 React？
-4. 是否需要多用户/权限管理？
-5. AI 方面：主要会用哪些模型？是否需要支持本地模型（Ollama/vLLM）？规则失效时希望 AI 自动修复后直接上线，还是必须人工审核？
+| 问题 | 决策 |
+| --- | --- |
+| 目标平台 | 不固定；部分需登录 → 站点级支持 none / cookie / form 三种登录方式 |
+| 技术栈 | 后端 Python + FastAPI，前端 Vue3 + Element Plus |
+| 部署 | 单机 docker-compose；站点数与采集频率均可动态配置 |
+| 账号权限 | 首期仅超级管理员账号（环境变量初始化，JWT 登录），后续再扩展 |
+| AI 模型 | 只实现 OpenAI 协议与 Anthropic 协议两种 Provider（覆盖 Claude、DeepSeek、Gemini 等）；暂不支持本地模型 |
+| AI 审核 | 不设审核环节，AI 生成/修复的规则试跑通过即启用，依赖规则版本回滚兜底 |
