@@ -87,6 +87,97 @@
 | `browser` | SPA/JS 渲染、需滚动加载 | Playwright（浏览器上下文池复用） |
 | `api` | 页面背后有 JSON 接口 | httpx + JSONPath（可在浏览器模式下自动嗅探 XHR 推荐使用） |
 
+### 3.4 AI 自动生成规则（可开关）
+
+用户只给一个网址，AI 分析页面后产出 3.1 中的 JSON 规则，人工只需确认/微调。
+
+**设计原则：AI 只负责"生成规则"，不参与每次采集。** 规则生成后，日常采集仍由确定性的 Extractor 执行——速度快、零 token 成本、结果可复现。AI 仅在新建站点、规则失效修复时调用。
+
+#### 生成流程
+
+```
+用户输入 URL ──► [AI 开关检查] ──► Playwright 打开页面
+  1. 页面采集：渲染后 HTML + 截图(可选，多模态模型) + 嗅探到的 XHR JSON 响应
+  2. 预处理压缩（控制 token）：
+     - 删除 script/style/svg/注释/隐藏元素，只保留 class/id/href/src/data-* 属性
+     - 识别重复兄弟结构（候选拍品列表），只保留前 3 个样本，其余折叠为 "<!-- ×N similar -->"
+     - 超长文本截断，整体压到 ~30k token 以内
+  3. 调用 LLM：系统提示 + 规则 JSON Schema + 压缩后 HTML/接口样本
+     → 通过 tool calling / JSON Schema 结构化输出返回规则
+  4. 校验：Pydantic 校验规则结构；选择器语法检查
+  5. 试跑：用生成的规则在当前页面上抽取
+  6. 自我修正（最多 3 轮）：抽取 0 条、关键字段（标题/价格）空值率高、价格无法解析时，
+     把错误信息 + 实际抽取样本回传给 LLM 修正
+  7. 返回前端：规则 + 试跑结果表格 + AI 说明（每个字段为什么这样选）
+  8. 用户确认 → 保存为新规则版本（origin=ai）
+```
+
+#### 触发场景
+
+| 场景 | 说明 |
+| --- | --- |
+| 新建站点 | 添加 URL 时勾选"AI 生成规则"，替代可视化选取器的手工操作 |
+| 自然语言补充 | 用户可附加说明，如"还要抓保证金和围观人数"、"只要已成交的" |
+| 规则失效修复 | 失效检测触发后，可配置自动调用 AI 重新生成，生成结果进入"待审核"，不直接上线 |
+| 优先选接口 | 若嗅探到返回拍品数据的 JSON 接口，AI 优先生成 `api` 模式规则（更稳定） |
+
+#### 开关粒度
+
+- **全局开关**：系统设置中开启/关闭 AI 功能；关闭后前端隐藏 AI 入口，后端接口返回 403。
+- **站点级开关**：某个站点可单独禁止 AI 自动修复（例如敏感站点）。
+- 未配置任何可用模型时，AI 功能自动不可用。
+
+#### 多模型 / 多协议支持
+
+抽象一个 `LLMProvider` 接口，按**协议**而不是按厂商实现，因此任何兼容这两种协议的模型都能接入：
+
+```python
+class LLMProvider(Protocol):
+    async def generate_structured(
+        self, system: str, messages: list[Message], schema: dict,
+        images: list[bytes] | None = None,
+    ) -> LLMResult: ...   # LLMResult: data(dict) / raw_text / usage(tokens)
+```
+
+| 协议 | 实现 | 可接入的模型示例 |
+| --- | --- | --- |
+| `openai` | 官方 `openai` SDK，`/v1/chat/completions`，可配 `base_url` | OpenAI、DeepSeek、通义千问、Kimi、智谱、豆包、Ollama/vLLM 本地模型、各类中转 |
+| `anthropic` | 官方 `anthropic` SDK，`/v1/messages`，可配 `base_url` | Claude 系列、兼容 Anthropic 协议的服务 |
+
+结构化输出策略（按能力降级）：
+1. 优先 **tool calling**：把规则 Schema 作为工具参数定义（OpenAI `tools` / Anthropic `tools.input_schema`），强制调用该工具；
+2. 次选 **JSON 模式**：OpenAI `response_format=json_schema/json_object`；
+3. 兜底 **文本解析**：要求输出 ```json 代码块，后端提取并校验。
+
+每个模型配置可声明能力位（是否支持 tools、是否支持图片），以适配能力较弱的兼容模型。
+
+模型配置项（系统设置页面管理，可配多个，指定一个默认）：
+
+```jsonc
+{
+  "name": "DeepSeek-V3",
+  "protocol": "openai",                 // openai | anthropic
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key": "sk-***",                  // 加密存储，接口不回显明文
+  "model": "deepseek-chat",
+  "max_tokens": 8192,
+  "temperature": 0,
+  "supports_tools": true,
+  "supports_vision": false,
+  "timeout": 120,
+  "is_default": true,
+  "enabled": true
+}
+```
+
+配置页提供"测试连接"按钮（发送一个最小请求验证 key/模型/结构化输出可用）。
+
+#### 安全与成本
+
+- API Key 使用应用主密钥（环境变量）对称加密入库，日志脱敏。
+- 页面内容可能含提示注入：AI 输出只是**声明式规则**（选择器 + 白名单 transform），不包含可执行代码，并经 Schema 严格校验，风险可控。
+- 记录每次调用的 token 用量与耗时，可设置每日调用上限。
+
 ## 4. 数据模型
 
 ```
@@ -95,7 +186,20 @@ source            站点/采集源
   rate_limit(每秒请求数), enabled, created_at
 
 rule              采集规则（版本化）
-  id, source_id, version, config(JSONB, 见 3.1), is_active, created_at
+  id, source_id, version, config(JSONB, 见 3.1), is_active,
+  origin(manual/visual/ai), status(draft/pending_review/active), created_at
+
+llm_provider      AI 模型配置（见 3.4）
+  id, name, protocol(openai/anthropic), base_url, api_key(加密), model,
+  params(JSONB: max_tokens/temperature/timeout), supports_tools, supports_vision,
+  is_default, enabled
+
+ai_generation     AI 生成记录
+  id, source_id, provider_id, url, user_hint, status(success/failed),
+  rounds(修正轮数), result_rule_id, prompt_tokens, completion_tokens,
+  duration_ms, error, created_at
+
+system_setting    全局设置（key/value），如 ai.enabled、ai.daily_limit、ai.auto_repair
 
 schedule          调度
   id, source_id, cron, enabled, next_run_at
