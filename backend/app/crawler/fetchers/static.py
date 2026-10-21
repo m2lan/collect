@@ -2,7 +2,7 @@ from typing import Any
 
 import httpx
 
-from app.crawler.fetchers.base import DEFAULT_UA, FetchContext, Fetched
+from app.crawler.fetchers.base import FetchContext, Fetched
 from app.schemas.rule import FetchConfig
 
 
@@ -24,7 +24,8 @@ class StaticFetcher:
         if self.ctx.auth_type == "form" and not self.ctx.storage_state:
             await self._login()
         self.client = httpx.AsyncClient(
-            headers={"User-Agent": DEFAULT_UA, **self.ctx.headers},
+            headers=self.ctx.request_headers,
+            proxy=self.ctx.proxy or None,
             cookies=self._cookies(),
             timeout=self.fetch_config.timeout,
             follow_redirects=True,
@@ -49,14 +50,20 @@ class StaticFetcher:
 
         await login_with_browser(self.ctx, self.fetch_config)
 
-    async def fetch(self, url: str) -> Fetched:
+    async def _request(self, url: str, method: str, body: dict[str, Any] | None) -> httpx.Response:
         assert self.client
-        resp = await self.client.get(url)
+        if method == "POST":
+            return await self.client.post(url, json=body or {})
+        return await self.client.get(url)
+
+    async def fetch(self, url: str, method: str = "GET", body: dict[str, Any] | None = None) -> Fetched:
+        resp = await self._request(url, method, body)
         fetched = Fetched(url=str(resp.url), status=resp.status_code, html=resp.text)
         if self.ctx.needs_login(fetched):
             await self._login()
+            assert self.client
             self.client.cookies = self._cookies()
-            resp = await self.client.get(url)
+            resp = await self._request(url, method, body)
             fetched = Fetched(url=str(resp.url), status=resp.status_code, html=resp.text)
         resp.raise_for_status()
         return fetched

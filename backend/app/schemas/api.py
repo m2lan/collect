@@ -55,6 +55,7 @@ class SourceBase(BaseModel):
     rate_limit: float = Field(1.0, gt=0, le=20)
     enabled: bool = True
     allow_ai_repair: bool = True
+    use_proxy: bool = False
 
 
 class SourceIn(SourceBase):
@@ -82,6 +83,7 @@ class PreviewIn(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     auth_type: AuthType = "none"
     auth: AuthIn = Field(default_factory=AuthIn)
+    use_proxy: bool = False
     rule: RuleConfig
     max_pages: int = Field(1, ge=1, le=5)
 
@@ -157,6 +159,7 @@ class SnapshotIn(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     auth_type: AuthType = "none"
     auth: AuthIn = Field(default_factory=AuthIn)
+    use_proxy: bool = False
 
 
 class LotOut(BaseModel):
@@ -214,6 +217,29 @@ class AlertSettings(BaseModel):
     webhook_url: str = ""
 
 
+class CrawlerSettings(BaseModel):
+    proxies: list[str] = Field(default_factory=list, description="代理地址列表，如 http://user:pass@host:port")
+    random_ua: bool = True
+
+
+class TemplateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    description: str | None = None
+    fetch_mode: FetchMode = "static"
+    config: RuleConfig
+
+
+class TemplateOut(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    fetch_mode: str
+    config: dict[str, Any]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ProviderIn(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     protocol: Literal["openai", "anthropic"]
@@ -253,6 +279,7 @@ class GenerateIn(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     auth_type: AuthType = "none"
     auth: AuthIn = Field(default_factory=AuthIn)
+    use_proxy: bool = False
     hint: str | None = Field(None, max_length=2000)
     provider_id: int | None = None
     apply: bool = False

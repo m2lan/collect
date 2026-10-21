@@ -1,26 +1,40 @@
 import inspect
 import json
+from urllib.parse import unquote, urlsplit
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, Response, async_playwright
 
 from app.config import get_settings
-from app.crawler.fetchers.base import DEFAULT_UA, FetchContext, Fetched, LoginError
+from app.crawler.fetchers.base import FetchContext, Fetched, LoginError
 from app.schemas.rule import FetchConfig
 
 
-async def _launch(pw: Playwright) -> Browser:
+def _proxy_settings(proxy: str | None) -> dict[str, str] | None:
+    if not proxy:
+        return None
+    u = urlsplit(proxy)
+    server = f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
+    out = {"server": server}
+    if u.username:
+        out["username"] = unquote(u.username)
+        out["password"] = unquote(u.password or "")
+    return out
+
+
+async def _launch(pw: Playwright, proxy: str | None = None) -> Browser:
     settings = get_settings()
     return await pw.chromium.launch(
         headless=settings.browser_headless,
         executable_path=settings.browser_executable_path or None,
         args=["--disable-blink-features=AutomationControlled"],
+        proxy=_proxy_settings(proxy),  # type: ignore[arg-type]
     )
 
 
 async def _new_context(browser: Browser, ctx: FetchContext) -> BrowserContext:
     context = await browser.new_context(
-        user_agent=ctx.headers.get("User-Agent", DEFAULT_UA),
+        user_agent=ctx.request_headers.get("User-Agent", ctx.user_agent),
         extra_http_headers={k: v for k, v in ctx.headers.items() if k.lower() != "user-agent"},
         storage_state=ctx.storage_state if ctx.auth_type == "form" else None,
         locale="zh-CN",
@@ -65,7 +79,7 @@ async def _do_login(page: Page, ctx: FetchContext, timeout_ms: int) -> dict[str,
 
 async def login_with_browser(ctx: FetchContext, fetch: FetchConfig) -> dict[str, Any]:
     async with async_playwright() as pw:
-        browser = await _launch(pw)
+        browser = await _launch(pw, ctx.proxy)
         try:
             context = await _new_context(browser, ctx)
             return await _do_login(await context.new_page(), ctx, fetch.timeout * 1000)
@@ -85,7 +99,7 @@ class BrowserFetcher:
 
     async def __aenter__(self) -> "BrowserFetcher":
         pw = await self._pw_cm.__aenter__()
-        self.browser = await _launch(pw)
+        self.browser = await _launch(pw, self.ctx.proxy)
         context = await _new_context(self.browser, self.ctx)
         self.page = await context.new_page()
         if self.capture_json:
@@ -111,7 +125,9 @@ class BrowserFetcher:
             data = json.loads(body)
         except Exception:
             return
-        self._json.append({"url": resp.url, "method": resp.request.method, "data": data})
+        self._json.append({
+            "url": resp.url, "method": resp.request.method, "body": resp.request.post_data, "data": data,
+        })
 
     async def screenshot(self) -> bytes | None:
         if not self.page:
@@ -143,7 +159,7 @@ class BrowserFetcher:
             json_responses=list(self._json),
         )
 
-    async def fetch(self, url: str) -> Fetched:
+    async def fetch(self, url: str, method: str = "GET", body: dict[str, Any] | None = None) -> Fetched:
         fetched = await self._load(url)
         if self.ctx.needs_login(fetched):
             assert self.page

@@ -5,6 +5,7 @@ from app.models.entities import (
     Lot,
     PriceSnapshot,
     Rule,
+    RuleTemplate,
     Schedule,
     Source,
     SystemSetting,
@@ -12,5 +13,5 @@ from app.models.entities import (
 )
 
 __all__ = [
-    "AIGeneration", "CrawlRun", "LLMProvider", "Lot", "PriceSnapshot", "Rule", "Schedule", "Source", "SystemSetting", "User",
+    "AIGeneration", "CrawlRun", "LLMProvider", "Lot", "PriceSnapshot", "Rule", "RuleTemplate", "Schedule", "Source", "SystemSetting", "User",
 ]

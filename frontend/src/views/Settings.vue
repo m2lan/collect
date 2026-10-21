@@ -19,11 +19,46 @@
       </el-form-item>
       <el-form-item>
         <el-button type="primary" @click="saveSettings">保存</el-button>
-        <el-tag v-if="ai.enabled" :type="ai.available ? 'success' : 'warning'" style="margin-left: 12px">
+        <el-tag disable-transitions v-if="ai.enabled" :type="ai.available ? 'success' : 'warning'" style="margin-left: 12px">
           {{ ai.available ? 'AI 可用' : '未配置可用模型或已达今日上限' }}
         </el-tag>
       </el-form-item>
     </el-form>
+  </el-card>
+
+  <el-card style="margin-top: 16px">
+    <template #header><b>采集设置</b></template>
+    <el-form :model="crawler" label-width="150px" style="max-width: 760px">
+      <el-form-item label="代理池">
+        <el-input v-model="proxiesText" type="textarea" :rows="4" class="mono"
+          placeholder="每行一个，如：&#10;http://user:pass@1.2.3.4:8080&#10;socks5://5.6.7.8:1080" />
+        <div class="muted">站点开启"使用代理"后，每次采集随机选择一个</div>
+      </el-form-item>
+      <el-form-item label="随机 User-Agent">
+        <el-switch v-model="crawler.random_ua" />
+        <span class="muted" style="margin-left: 12px">每次采集随机使用常见浏览器的 UA（站点自定义请求头优先）</span>
+      </el-form-item>
+      <el-form-item><el-button type="primary" @click="saveCrawler">保存</el-button></el-form-item>
+    </el-form>
+  </el-card>
+
+  <el-card style="margin-top: 16px">
+    <template #header><b>规则模板</b></template>
+    <el-table :data="templates" size="small">
+      <el-table-column label="名称" prop="name" min-width="140" />
+      <el-table-column label="说明" prop="description" min-width="200" show-overflow-tooltip />
+      <el-table-column label="抓取方式" width="100"><template #default="{ row }">{{ row.config.fetch?.mode === 'api' ? '接口' : row.fetch_mode === 'browser' ? '浏览器' : '静态' }}</template></el-table-column>
+      <el-table-column label="字段数" width="80"><template #default="{ row }">{{ row.config.list.fields.length }}</template></el-table-column>
+      <el-table-column label="创建时间" width="150"><template #default="{ row }">{{ fmtTime(row.created_at) }}</template></el-table-column>
+      <el-table-column label="" width="80">
+        <template #default="{ row }">
+          <el-popconfirm title="确定删除该模板？" @confirm="removeTemplate(row)">
+            <template #reference><el-button link type="danger">删除</el-button></template>
+          </el-popconfirm>
+        </template>
+      </el-table-column>
+    </el-table>
+    <div class="muted" style="margin-top: 8px">在站点编辑的"采集规则"中可将规则保存为模板，或从模板导入。</div>
   </el-card>
 
   <el-card style="margin-top: 16px">
@@ -67,14 +102,14 @@
       <el-table-column label="API Key" prop="api_key_masked" width="130" />
       <el-table-column label="能力" width="140">
         <template #default="{ row }">
-          <el-tag v-if="row.supports_tools" size="small">工具调用</el-tag>
-          <el-tag v-if="row.supports_vision" size="small" type="success" style="margin-left: 4px">视觉</el-tag>
+          <el-tag disable-transitions v-if="row.supports_tools" size="small">工具调用</el-tag>
+          <el-tag disable-transitions v-if="row.supports_vision" size="small" type="success" style="margin-left: 4px">视觉</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="状态" width="110">
         <template #default="{ row }">
-          <el-tag v-if="row.is_default" type="warning" size="small">默认</el-tag>
-          <el-tag :type="row.enabled ? 'success' : 'info'" size="small" style="margin-left: 4px">{{ row.enabled ? '启用' : '停用' }}</el-tag>
+          <el-tag disable-transitions v-if="row.is_default" type="warning" size="small">默认</el-tag>
+          <el-tag disable-transitions :type="row.enabled ? 'success' : 'info'" size="small" style="margin-left: 4px">{{ row.enabled ? '启用' : '停用' }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="操作" width="200">
@@ -100,7 +135,7 @@
       <el-table-column label="触发" width="80"><template #default="{ row }">{{ row.trigger === 'repair' ? '自动修复' : '手动' }}</template></el-table-column>
       <el-table-column label="URL" prop="url" min-width="200" show-overflow-tooltip />
       <el-table-column label="结果" width="80">
-        <template #default="{ row }"><el-tag :type="row.status === 'success' ? 'success' : row.status === 'failed' ? 'danger' : 'info'" size="small">{{ { success: '成功', failed: '失败', running: '进行中' }[row.status] }}</el-tag></template>
+        <template #default="{ row }"><el-tag disable-transitions :type="row.status === 'success' ? 'success' : row.status === 'failed' ? 'danger' : 'info'" size="small">{{ { success: '成功', failed: '失败', running: '进行中' }[row.status] }}</el-tag></template>
       </el-table-column>
       <el-table-column label="轮数" prop="rounds" width="60" />
       <el-table-column label="条数" prop="item_count" width="60" />
@@ -156,8 +191,9 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  aiUsage, createProvider, deleteProvider, getAISettings, getAlertSettings, listGenerations, listProviders,
-  putAISettings, putAlertSettings, testAlert, testProvider, updateProvider,
+  aiUsage, createProvider, deleteProvider, deleteTemplate, getAISettings, getAlertSettings, getCrawlerSettings,
+  listGenerations, listProviders, listTemplates, putAISettings, putAlertSettings, putCrawlerSettings, testAlert,
+  testProvider, updateProvider,
 } from '../api'
 import { fmtTime } from '../format'
 
@@ -184,6 +220,20 @@ const pf = ref({})
 const testing = ref(null)
 const alert = ref({ failure_threshold: 2, webhook_type: 'none', webhook_url: '' })
 const alertTesting = ref(false)
+const crawler = ref({ proxies: [], random_ua: true })
+const proxiesText = ref('')
+const templates = ref([])
+
+async function saveCrawler() {
+  crawler.value = await putCrawlerSettings({ ...crawler.value, proxies: proxiesText.value.split('\n') })
+  proxiesText.value = crawler.value.proxies.join('\n')
+  ElMessage.success('已保存')
+}
+
+async function removeTemplate(row) {
+  await deleteTemplate(row.id)
+  templates.value = await listTemplates()
+}
 
 async function saveAlert() {
   alert.value = await putAlertSettings(alert.value)
@@ -206,6 +256,9 @@ const baseUrlSuggestions = (q, cb) => cb(BASE_URLS[pf.value.protocol].filter((u)
 async function load() {
   ai.value = await getAISettings()
   alert.value = await getAlertSettings()
+  crawler.value = await getCrawlerSettings()
+  proxiesText.value = crawler.value.proxies.join('\n')
+  templates.value = await listTemplates()
   providers.value = await listProviders()
   usage.value = await aiUsage()
   loadGenerations()

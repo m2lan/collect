@@ -11,6 +11,14 @@ DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 )
+USER_AGENTS = [
+    DEFAULT_UA,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+]
 
 
 class LoginError(Exception):
@@ -38,6 +46,14 @@ class FetchContext:
     storage_state: dict[str, Any] | None = None
     # 表单登录成功后回调，用于持久化新的浏览器状态
     on_storage_state: Callable[[dict[str, Any]], Any] | None = None
+    # 代理地址，如 http://user:pass@1.2.3.4:8080 或 socks5://1.2.3.4:1080
+    proxy: str | None = None
+    user_agent: str = DEFAULT_UA
+
+    @property
+    def request_headers(self) -> dict[str, str]:
+        has_ua = any(k.lower() == "user-agent" for k in self.headers)
+        return self.headers if has_ua else {"User-Agent": self.user_agent, **self.headers}
 
     def needs_login(self, fetched: Fetched) -> bool:
         if self.auth_type != "form":
@@ -55,7 +71,7 @@ class FetchContext:
 
 
 class Fetcher(Protocol):
-    async def fetch(self, url: str) -> Fetched: ...
+    async def fetch(self, url: str, method: str = "GET", body: dict[str, Any] | None = None) -> Fetched: ...
 
 
 @asynccontextmanager

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import func, select, update
@@ -8,7 +8,7 @@ from app.crawler.cookies import parse_cookies
 from app.crawler.fetchers import FetchContext, LoginError
 from app.crawler.pipeline import jsonable
 from app.crawler.fetchers import open_fetcher
-from app.crawler.runner import crawl
+from app.crawler.runner import crawl, network_options
 from app.crawler.snapshot import sanitize_snapshot
 from app.schemas.rule import FetchConfig
 from app.models import CrawlRun, Lot, Rule, Schedule, Source
@@ -77,7 +77,8 @@ async def _source_out(session: SessionDep, source: Source) -> SourceOut:
     return SourceOut(
         id=source.id, name=source.name, start_url=source.start_url, fetch_mode=source.fetch_mode,
         headers=source.headers or {}, auth_type=source.auth_type, rate_limit=source.rate_limit,
-        enabled=source.enabled, allow_ai_repair=source.allow_ai_repair, created_at=source.created_at,
+        enabled=source.enabled, allow_ai_repair=source.allow_ai_repair, use_proxy=source.use_proxy,
+        created_at=source.created_at,
         auth=_auth_out(source), health=source.health, health_message=source.health_message,
         active_rule=rule.config if rule else None, active_rule_version=rule.version if rule else None,
         lot_count=lot_count or 0, last_run=RunOut.model_validate(last_run) if last_run else None,
@@ -120,7 +121,7 @@ async def create_source(body: SourceIn, session: SessionDep) -> SourceOut:
     source = Source(
         name=body.name, start_url=str(body.start_url), fetch_mode=body.fetch_mode, headers=body.headers,
         auth_type=body.auth_type, rate_limit=body.rate_limit, enabled=body.enabled,
-        allow_ai_repair=body.allow_ai_repair, auth_config=encrypt_json(merge_auth(body.auth_type, body.auth, None)),
+        allow_ai_repair=body.allow_ai_repair, use_proxy=body.use_proxy, auth_config=encrypt_json(merge_auth(body.auth_type, body.auth, None)),
     )
     session.add(source)
     await session.flush()
@@ -138,7 +139,7 @@ async def update_source(source_id: int, body: SourceIn, session: SessionDep) -> 
     if new_auth != (decrypt_json(source.auth_config) or {}):
         source.storage_state = None  # 登录信息变化后旧会话失效
     source.auth_config = encrypt_json(new_auth)
-    for field in ("name", "fetch_mode", "headers", "auth_type", "rate_limit", "enabled", "allow_ai_repair"):
+    for field in ("name", "fetch_mode", "headers", "auth_type", "rate_limit", "enabled", "allow_ai_repair", "use_proxy"):
         setattr(source, field, getattr(body, field))
     source.start_url = str(body.start_url)
     if body.rule:
@@ -157,7 +158,7 @@ async def delete_source(source_id: int, session: SessionDep) -> None:
 
 
 @router.post("/{source_id}/crawl", response_model=RunOut, status_code=status.HTTP_202_ACCEPTED)
-async def trigger_crawl(source_id: int, session: SessionDep) -> RunOut:
+async def trigger_crawl(source_id: int, session: SessionDep, kind: Literal["full", "live"] = "full") -> RunOut:
     await _get_source(session, source_id)
     if not await session.scalar(select(Rule.id).where(Rule.source_id == source_id, Rule.is_active)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该站点还没有启用的采集规则")
@@ -166,7 +167,7 @@ async def trigger_crawl(source_id: int, session: SessionDep) -> RunOut:
     )
     if running:
         raise HTTPException(status.HTTP_409_CONFLICT, "该站点已有采集任务在执行")
-    run = CrawlRun(source_id=source_id, trigger="manual", status="pending")
+    run = CrawlRun(source_id=source_id, trigger="manual", kind=kind, status="pending")
     session.add(run)
     await session.commit()
     await enqueue_crawl(run.id)
@@ -238,26 +239,28 @@ async def activate_rule(source_id: int, rule_id: int, session: SessionDep) -> Ru
     return rule
 
 
-def build_context(body: PreviewIn | Any, source: Source | None) -> FetchContext:
+async def build_context(session: SessionDep, body: PreviewIn | Any, source: Source | None) -> FetchContext:
     """用表单中（可能未保存）的配置构造抓取上下文；编辑已有站点时复用其已保存的凭据与会话。"""
     stored, storage_state = None, None
     if source is not None and source.auth_type == body.auth_type:
         stored = decrypt_json(source.auth_config)
         storage_state = decrypt_json(source.storage_state)
-    return FetchContext(
+    ctx = FetchContext(
         start_url=str(body.start_url), fetch_mode=body.fetch_mode, headers=body.headers,
         auth_type=body.auth_type, auth_config=merge_auth(body.auth_type, body.auth, stored),
         storage_state=storage_state,
     )
+    ctx.proxy, ctx.user_agent = await network_options(session, body.use_proxy)
+    return ctx
 
 
 @preview_router.post("/preview", response_model=PreviewOut)
 async def preview(body: PreviewIn, session: SessionDep) -> PreviewOut:
     """按当前（未保存的）配置试跑，不写入数据库。"""
     source = await _get_source(session, body.source_id) if body.source_id else None
-    ctx = build_context(body, source)
+    ctx = await build_context(session, body, source)
     try:
-        result = await crawl(ctx, body.rule, rate_limit=2, max_pages=body.max_pages)
+        result = await crawl(ctx, body.rule, rate_limit=2, max_pages=body.max_pages, with_detail=body.rule.detail.enabled)
     except LoginError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except Exception as exc:
@@ -270,7 +273,7 @@ async def preview(body: PreviewIn, session: SessionDep) -> PreviewOut:
 async def snapshot(body: SnapshotIn, session: SessionDep) -> dict:
     """抓取页面并返回清洗后的 HTML（去除脚本），供可视化选取器在 iframe 中展示。"""
     source = await _get_source(session, body.source_id) if body.source_id else None
-    ctx = build_context(body, source)
+    ctx = await build_context(session, body, source)
     browser = body.fetch_mode == "browser"
     try:
         async with open_fetcher(ctx, FetchConfig(wait_ms=1500 if browser else 0, scroll=browser, timeout=45)) as fetcher:
@@ -280,3 +283,24 @@ async def snapshot(body: SnapshotIn, session: SessionDep) -> dict:
     except Exception as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"抓取失败: {type(exc).__name__}: {exc}") from exc
     return {"url": fetched.url, "html": sanitize_snapshot(fetched.html, fetched.url)}
+
+
+@preview_router.post("/sniff")
+async def sniff(body: SnapshotIn, session: SessionDep) -> dict:
+    """用浏览器打开页面，找出返回拍品列表的 JSON 接口，并给出 api 模式规则草稿。"""
+    from app.ai.rule_generator import capture_page
+    from app.crawler.sniff import draft_rule, find_candidates
+
+    source = await _get_source(session, body.source_id) if body.source_id else None
+    ctx = await build_context(session, body, source)
+    try:
+        snap = await capture_page(ctx, "browser", want_screenshot=False)
+    except LoginError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"抓取失败: {type(exc).__name__}: {exc}") from exc
+    candidates = find_candidates(snap.json_responses)
+    return {
+        "captured": len(snap.json_responses),
+        "candidates": [{**{k: v for k, v in c.items() if k != "score"}, "rule": draft_rule(c)} for c in candidates],
+    }

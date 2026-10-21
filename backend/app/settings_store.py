@@ -14,6 +14,8 @@ DEFAULTS: dict[str, Any] = {
     "alert.failure_threshold": 2,  # 连续失败多少次判定规则失效
     "alert.webhook_type": "none",  # none / generic / wecom / dingtalk / feishu
     "alert.webhook_url": "",
+    "crawler.proxies": [],  # 代理池，站点开启"使用代理"后每次采集随机选一个
+    "crawler.random_ua": True,  # 每次采集随机选择 User-Agent（站点自定义请求头优先）
 }
 
 

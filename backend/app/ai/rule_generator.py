@@ -8,6 +8,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
@@ -21,9 +22,10 @@ from app.ai.prompts import (
     tool_schema,
 )
 from app.ai.providers import LLMError, LLMProvider, Message
-from app.crawler.extractor import extract_page
+from app.crawler.extractor import PageResult, extract_json, extract_page
 from app.crawler.fetchers import FetchContext, open_fetcher
 from app.crawler.pipeline import jsonable
+from app.crawler.sniff import find_candidates
 from app.schemas.rule import FetchConfig, RuleConfig
 
 log = logging.getLogger(__name__)
@@ -64,36 +66,37 @@ async def capture_page(ctx: FetchContext, fetch_mode: str, want_screenshot: bool
 
 
 def summarize_json(responses: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
-    """挑出最像拍品列表的 JSON 响应（含对象数组），只保留结构样本。"""
+    """挑出最像拍品列表的 JSON 接口，只保留结构样本。"""
+    return [
+        {k: c[k] for k in ("url", "method", "body", "items_path", "count", "sample")}
+        for c in find_candidates(responses, limit)
+    ]
 
-    def best_array(node: Any, path: str = "$") -> tuple[int, str, list] | None:
-        best = None
-        if isinstance(node, list) and node and all(isinstance(x, dict) for x in node[:5]):
-            best = (len(node), path, node)
-        children = node.items() if isinstance(node, dict) else []
-        for k, v in children:
-            found = best_array(v, f"{path}.{k}")
-            if found and (best is None or found[0] > best[0]):
-                best = found
-        return best
 
-    scored = []
-    for r in responses:
-        found = best_array(r["data"])
-        if found and found[0] >= 2:
-            scored.append((found[0], r["url"], found[1], found[2][:2]))
-    scored.sort(key=lambda x: -x[0])
-    return [{"url": u, "items_path": p, "count": n, "sample": s} for n, u, p, s in scored[:limit]]
+def _api_page(config: RuleConfig, snapshot: PageSnapshot) -> PageResult | None:
+    target = urlsplit(config.fetch.url or snapshot.url)._replace(query="", fragment="").geturl()
+    for r in snapshot.json_responses:
+        if urlsplit(r["url"])._replace(query="", fragment="").geturl() == target:
+            return extract_json(r["data"], r["url"], config)
+    return None
 
 
 def evaluate(config: RuleConfig, snapshot: PageSnapshot) -> tuple[list[dict[str, Any]], list[str], bool]:
     """试跑规则并找出问题。返回 (抽取结果, 问题列表, 是否可接受)。"""
-    page = extract_page(snapshot.html, snapshot.url, config)
+    is_api = config.fetch.mode == "api"
+    if is_api:
+        api_page = _api_page(config, snapshot)
+        if api_page is None:
+            return [], [f"fetch.url `{config.fetch.url}` 不在页面捕获到的接口中，请使用捕获列表里的接口地址。"], False
+        page = api_page
+    else:
+        page = extract_page(snapshot.html, snapshot.url, config)
     items = page.items
     problems: list[str] = list(page.errors[:5])
     keys = [f.key for f in config.list.fields]
     if not items:
-        problems.append(f"item_selector `{config.list.item_selector}` 在页面中没有匹配到任何元素。")
+        what = "接口数据" if is_api else "页面"
+        problems.append(f"item_selector `{config.list.item_selector}` 在{what}中没有匹配到任何拍品。")
         return items, problems, False
 
     critical = False

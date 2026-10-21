@@ -19,7 +19,16 @@ SYSTEM_PROMPT = """你是网页数据采集专家，负责为拍卖平台的拍�
   - transform（按顺序执行）：trim、price（解析金额与币种，支持“万/亿”）、number、int、datetime、absolute_url、status（把“进行中/已成交/流拍/即将开始”等映射为标准状态）、lower，
     或 {"name":"regex_replace","pattern":"...","repl":"..."}
 - list.unique_key：用于去重的字段名，优先 url 或拍品编号。
-- pagination：type=none / next_link（selector 为“下一页”链接的 CSS 选择器）/ url_template（template 含 {page}，start 起始页码，max_pages）。
+- pagination：type=none / next_link（selector 为“下一页”链接的 CSS 选择器）/ url_template（template 含 {page}，start 起始页码，max_pages）
+  / page_param（param 为页码参数名：GET 时作为查询参数，POST 时作为请求体字段）。
+- detail：详情页补充字段，一般保持 enabled=false（你看不到详情页）。
+
+## 接口模式（api）
+如果提供了“捕获到的 JSON 接口”且其中包含完整的拍品列表，优先生成 api 模式规则（比解析 HTML 稳定）：
+- fetch.mode="api"，fetch.url=接口地址，fetch.method=GET/POST，POST 时 fetch.body 为请求体 JSON
+- list.item_selector_type="jsonpath"，list.item_selector 为拍品数组的 JSONPath（如 $.data.list[*]）
+- 字段 type="jsonpath"，selector 为相对单个拍品的 JSONPath（如 $.title、$.price.current）
+- 翻页用 url_template 或 page_param，不能用 next_link
 
 ## 标准字段名（尽量使用）
 title 标题、url 详情链接、image 图片、current_price 当前价、start_price 起拍价、deal_price 成交价、bid_count 出价次数、
@@ -68,8 +77,8 @@ def first_message(url: str, compressed_html: str, hint: str | None, fetch_mode: 
         parts.append(f"管理员的额外要求：{hint}")
     if json_samples:
         parts.append(
-            "页面加载时捕获到的 JSON 接口（可能包含拍品数据，仅供理解页面，规则仍需基于 HTML）：\n"
-            + json.dumps(json_samples, ensure_ascii=False)[:8000]
+            "页面加载时捕获到的 JSON 接口（items_path 为拍品数组位置，sample 为第一个拍品）：\n"
+            + json.dumps(json_samples, ensure_ascii=False)[:10000]
         )
     parts.append("精简后的页面 HTML：\n" + compressed_html)
     parts.append(f"请调用 {TOOL_NAME} 提交采集规则。")

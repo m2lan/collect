@@ -25,25 +25,26 @@
       <el-table-column label="健康" width="80">
         <template #default="{ row }">
           <el-tooltip :disabled="!row.health_message" :content="row.health_message || ''" placement="top">
-            <el-tag :type="HEALTH[row.health].type" size="small">{{ HEALTH[row.health].label }}</el-tag>
+            <el-tag disable-transitions :type="HEALTH[row.health].type" size="small">{{ HEALTH[row.health].label }}</el-tag>
           </el-tooltip>
         </template>
       </el-table-column>
       <el-table-column label="最近采集" width="170">
         <template #default="{ row }">
           <template v-if="row.last_run">
-            <el-tag :type="RUN_STATUS[row.last_run.status]?.type" size="small">{{ RUN_STATUS[row.last_run.status]?.label }}</el-tag>
+            <el-tag disable-transitions :type="RUN_STATUS[row.last_run.status]?.type" size="small">{{ RUN_STATUS[row.last_run.status]?.label }}</el-tag>
             <span class="muted"> {{ fmtTime(row.last_run.created_at) }}</span>
           </template>
           <span v-else class="muted">从未采集</span>
         </template>
       </el-table-column>
       <el-table-column label="启用" width="70">
-        <template #default="{ row }"><el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '是' : '否' }}</el-tag></template>
+        <template #default="{ row }"><el-tag disable-transitions :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '是' : '否' }}</el-tag></template>
       </el-table-column>
-      <el-table-column label="操作" width="230" fixed="right">
+      <el-table-column label="操作" width="270" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" :disabled="!row.active_rule_version" @click="crawl(row)">立即采集</el-button>
+          <el-button link type="primary" :disabled="!row.active_rule_version" @click="crawl(row, 'live')">盯价</el-button>
           <el-button link type="primary" @click="openDialog(row)">编辑</el-button>
           <el-button link @click="router.push({ name: 'runs', query: { source_id: row.id } })">记录</el-button>
           <el-popconfirm title="删除站点会同时删除其拍品数据，确定？" @confirm="remove(row)">
@@ -82,7 +83,7 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { MagicStick, Plus } from '@element-plus/icons-vue'
-import { aiGenerate, createSource, crawlSource, deleteSource, getAISettings, getSource, listSources } from '../api'
+import { aiGenerate, createSource, crawlLive, crawlSource, deleteSource, getAISettings, getSource, listSources } from '../api'
 import { RUN_STATUS, fmtTime } from '../format'
 import SourceDialog from '../components/SourceDialog.vue'
 
@@ -148,8 +149,8 @@ function openDialog(row = null, draft = null) {
   dialogVisible.value = true
 }
 
-async function crawl(row) {
-  const run = await crawlSource(row.id)
+async function crawl(row, kind = 'full') {
+  const run = kind === 'live' ? await crawlLive(row.id) : await crawlSource(row.id)
   ElMessage.success(`已创建采集任务 #${run.id}`)
   load()
 }

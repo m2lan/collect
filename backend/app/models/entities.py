@@ -50,6 +50,7 @@ class Source(Base):
     health_message: Mapped[str | None] = mapped_column(Text)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     allow_ai_repair: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    use_proxy: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     rules: Mapped[list["Rule"]] = relationship(back_populates="source", cascade="all, delete-orphan")
@@ -185,3 +186,16 @@ class Schedule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     next_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+
+class RuleTemplate(Base):
+    """规则模板：常见平台的规则沉淀下来，新建站点时一键套用。"""
+
+    __tablename__ = "rule_template"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str | None] = mapped_column(Text)
+    fetch_mode: Mapped[str] = mapped_column(String(16), default="static")
+    config: Mapped[dict[str, Any]] = mapped_column(JSONType)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

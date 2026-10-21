@@ -134,7 +134,7 @@ async def generate(body: GenerateIn, session: SessionDep) -> GenerateOut:
     source = await session.get(Source, body.source_id) if body.source_id else None
     if body.source_id and source is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "站点不存在")
-    ctx = build_context(body, source)
+    ctx = await build_context(session, body, source)
     gen, result = await service.run_generation(
         session, ctx, body.fetch_mode, hint=body.hint, source_id=body.source_id, provider_id=body.provider_id
     )

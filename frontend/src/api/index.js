@@ -43,3 +43,11 @@ export async function exportLots(params) {
   const resp = await http.get('/lots/export', { params, responseType: 'blob', timeout: 600000 })
   return resp
 }
+
+export const sniff = (body) => http.post('/sniff', body)
+export const crawlLive = (id) => http.post(`/sources/${id}/crawl`, null, { params: { kind: 'live' } })
+export const listTemplates = () => http.get('/templates')
+export const createTemplate = (body) => http.post('/templates', body)
+export const deleteTemplate = (id) => http.delete(`/templates/${id}`)
+export const getCrawlerSettings = () => http.get('/settings/crawler')
+export const putCrawlerSettings = (body) => http.put('/settings/crawler', body)

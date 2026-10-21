@@ -19,6 +19,10 @@
             <el-input v-model="headersText" type="textarea" :rows="3" class="mono" placeholder='{"Referer": "https://..."}' />
           </el-form-item>
           <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>
+          <el-form-item label="使用代理">
+            <el-switch v-model="form.use_proxy" />
+            <span class="muted" style="margin-left: 12px">从系统设置的代理池中随机选择</span>
+          </el-form-item>
           <el-form-item label="AI 自动修复">
             <el-switch v-model="form.allow_ai_repair" />
             <span class="muted" style="margin-left: 12px">规则失效时允许 AI 重新生成并启用（需在系统设置中开启）</span>
@@ -57,7 +61,7 @@
               <div class="muted">用于判断登录成功与登录是否失效，失效时自动重新登录。</div>
             </el-form-item>
             <el-form-item v-if="source?.auth?.has_session" label="登录会话">
-              <el-tag type="success" size="small">已保存</el-tag>
+              <el-tag disable-transitions type="success" size="small">已保存</el-tag>
               <el-button link type="danger" style="margin-left: 8px" @click="logout">清除会话</el-button>
             </el-form-item>
           </template>
@@ -80,6 +84,17 @@
         </el-alert>
         <div class="toolbar">
           <el-button type="primary" plain @click="openPicker">可视化选取</el-button>
+          <el-button type="primary" plain @click="openSniff">嗅探接口</el-button>
+          <el-dropdown @command="onTemplate">
+            <el-button>模板<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item v-for="t in templates" :key="t.id" :command="t">从模板导入：{{ t.name }}</el-dropdown-item>
+                <el-dropdown-item v-if="!templates.length" disabled>暂无模板</el-dropdown-item>
+                <el-dropdown-item command="save" divided>将当前规则保存为模板</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-button @click="ruleText = JSON.stringify(EXAMPLE_RULE, null, 2)">填入示例</el-button>
           <el-button @click="formatRule">格式化</el-button>
           <el-button type="success" :loading="previewing" @click="runPreview">试跑（第 1 页）</el-button>
@@ -95,6 +110,8 @@
               <p>transform：trim、price（解析金额与币种，支持"万"）、number、int、datetime、absolute_url、status（进行中/已成交/流拍…）、lower，或 {"name":"regex_replace","pattern":"..","repl":".."}。</p>
               <p><b>unique_key</b>：用于去重的字段，默认 url。<b>pagination</b>：none / next_link（selector）/ url_template（template 含 {page}）。</p>
               <p><b>fetch</b>：浏览器模式下可设置 wait_for（等待元素）、scroll（滚动加载）、wait_ms。</p>
+              <p><b>接口模式</b>：fetch.mode 设为 api，fetch.url / method / body 指定接口；item_selector_type 为 jsonpath（如 $.data.list[*]），字段 type 为 jsonpath（如 $.title）；翻页用 url_template 或 page_param（param 为页码参数名）。推荐用"嗅探接口"自动生成。</p>
+              <p><b>detail</b>：{"enabled": true, "url_field": "url", "fields": [...], "max_items": 50, "only_new": true} 打开每个拍品的详情页补充字段（选择器相对整个详情页），详情页的值优先；盯价任务也通过详情页刷新价格。</p>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -119,6 +136,15 @@
             <CronInput v-model="schedules.full.cron" :disabled="!schedules.full.enabled" />
             <div v-if="schedules.full.next_run_at" class="muted">下次执行：{{ fmtTime(schedules.full.next_run_at) }}</div>
           </el-form-item>
+          <el-divider />
+          <el-form-item label="盯价">
+            <el-switch v-model="schedules.live.enabled" />
+            <span class="muted" style="margin-left: 12px">只刷新"进行中"的拍品价格；规则配置了详情页时逐个抓取详情页，否则重新抓取列表页</span>
+          </el-form-item>
+          <el-form-item label="执行周期">
+            <CronInput v-model="schedules.live.cron" :disabled="!schedules.live.enabled" :presets="LIVE_PRESETS" />
+            <div v-if="schedules.live.next_run_at" class="muted">下次执行：{{ fmtTime(schedules.live.next_run_at) }}</div>
+          </el-form-item>
         </el-form>
       </el-tab-pane>
 
@@ -130,7 +156,7 @@
           <el-table-column label="创建时间" width="160"><template #default="{ row }">{{ fmtTime(row.created_at) }}</template></el-table-column>
           <el-table-column label="状态" width="180">
             <template #default="{ row }">
-              <el-tag v-if="row.is_active" type="success" size="small">使用中</el-tag>
+              <el-tag disable-transitions v-if="row.is_active" type="success" size="small">使用中</el-tag>
               <template v-else>
                 <el-button link type="primary" @click="activate(row)">切换到此版本</el-button>
                 <el-button link @click="ruleText = JSON.stringify(row.config, null, 2); tab = 'rule'">查看</el-button>
@@ -148,18 +174,21 @@
   </el-dialog>
 
   <VisualPicker v-model="pickerVisible" :request="pickerRequest" :base-rule="pickerBase" @done="onPicked" />
+  <SniffDialog v-model="sniffVisible" :request="pickerRequest" @done="onPicked" />
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  activateRule, aiGenerate, clearSession, createSource, getAISettings, listRules, listSchedules, preview,
-  saveSchedules, updateSource,
+  activateRule, aiGenerate, clearSession, createSource, createTemplate, getAISettings, listRules, listSchedules,
+  listTemplates, preview, saveSchedules, updateSource,
 } from '../api'
 import { fmtTime } from '../format'
 import CronInput from './CronInput.vue'
 import VisualPicker from './VisualPicker.vue'
+import SniffDialog from './SniffDialog.vue'
+import { ArrowDown } from '@element-plus/icons-vue'
 
 const props = defineProps({ modelValue: Boolean, source: Object, aiDraft: Object })
 const emit = defineEmits(['update:modelValue', 'saved'])
@@ -204,9 +233,18 @@ const pickedText = ref(null)
 const pickerVisible = ref(false)
 const pickerRequest = ref(null)
 const pickerBase = ref(null)
+const sniffVisible = ref(false)
+const templates = ref([])
 const emptySchedules = () => ({
   full: { kind: 'full', enabled: false, cron: '0 */2 * * *', next_run_at: null },
+  live: { kind: 'live', enabled: false, cron: '*/5 * * * *', next_run_at: null },
 })
+const LIVE_PRESETS = [
+  { label: '每分钟', value: '* * * * *' },
+  { label: '每 5 分钟', value: '*/5 * * * *' },
+  { label: '每 10 分钟', value: '*/10 * * * *' },
+  { label: '每 30 分钟', value: '*/30 * * * *' },
+]
 const schedules = ref(emptySchedules())
 
 const previewColumns = computed(() => {
@@ -226,6 +264,7 @@ async function init() {
     rate_limit: s?.rate_limit ?? 1,
     enabled: s?.enabled ?? true,
     allow_ai_repair: s?.allow_ai_repair ?? true,
+    use_proxy: s?.use_proxy ?? false,
     auth_type: s?.auth_type || 'none',
     auth: { ...emptyAuth(), ...pickAuth(s?.auth) },
   }
@@ -247,6 +286,7 @@ async function init() {
   }
   rules.value = s ? await listRules(s.id) : []
   aiAvailable.value = (await getAISettings()).available
+  templates.value = await listTemplates()
 }
 
 function pickAuth(a) {
@@ -325,6 +365,31 @@ function openPicker() {
   pickerRequest.value = { ...body, source_id: props.source?.id }
   pickerBase.value = rule
   pickerVisible.value = true
+}
+
+function openSniff() {
+  if (!form.value.start_url) return ElMessage.warning('请先在"基本信息"中填写列表页链接')
+  const { rule, rule_origin, ...body } = payload()
+  pickerRequest.value = { ...body, source_id: props.source?.id }
+  sniffVisible.value = true
+}
+
+async function onTemplate(cmd) {
+  if (cmd === 'save') {
+    const rule = parseJson(ruleText.value, '采集规则')
+    if (!rule) return ElMessage.warning('请先填写采集规则')
+    const answer = await ElMessageBox.prompt('模板名称', '保存为模板', {
+      inputValue: form.value.name, inputPattern: /\S/, inputErrorMessage: '请输入名称',
+    }).catch(() => null)
+    if (!answer) return
+    const name = answer.value
+    await createTemplate({ name, fetch_mode: form.value.fetch_mode, config: rule, description: form.value.start_url })
+    templates.value = await listTemplates()
+    return ElMessage.success('已保存为模板')
+  }
+  ruleText.value = JSON.stringify(cmd.config, null, 2)
+  form.value.fetch_mode = cmd.fetch_mode
+  ElMessage.success(`已导入模板「${cmd.name}」，可试跑验证`)
 }
 
 function onPicked(rule) {

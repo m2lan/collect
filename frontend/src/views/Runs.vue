@@ -10,7 +10,7 @@
       <el-table-column label="#" prop="id" width="70" />
       <el-table-column label="站点" min-width="140"><template #default="{ row }">{{ sourceName(row.source_id) }}</template></el-table-column>
       <el-table-column label="状态" width="90">
-        <template #default="{ row }"><el-tag :type="RUN_STATUS[row.status]?.type" size="small">{{ RUN_STATUS[row.status]?.label }}</el-tag></template>
+        <template #default="{ row }"><el-tag disable-transitions :type="RUN_STATUS[row.status]?.type" size="small">{{ RUN_STATUS[row.status]?.label }}</el-tag></template>
       </el-table-column>
       <el-table-column label="规则版本" width="90"><template #default="{ row }">{{ row.rule_version ? `v${row.rule_version}` : '-' }}</template></el-table-column>
       <el-table-column label="页数" prop="pages" width="70" />
