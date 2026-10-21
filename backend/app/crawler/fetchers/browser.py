@@ -1,7 +1,8 @@
 import inspect
+import json
 from typing import Any
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import Browser, BrowserContext, Page, Playwright, Response, async_playwright
 
 from app.config import get_settings
 from app.crawler.fetchers.base import DEFAULT_UA, FetchContext, Fetched, LoginError
@@ -73,9 +74,11 @@ async def login_with_browser(ctx: FetchContext, fetch: FetchConfig) -> dict[str,
 
 
 class BrowserFetcher:
-    def __init__(self, ctx: FetchContext, fetch: FetchConfig):
+    def __init__(self, ctx: FetchContext, fetch: FetchConfig, capture_json: bool = False):
         self.ctx = ctx
         self.fetch_config = fetch
+        self.capture_json = capture_json
+        self._json: list[dict[str, Any]] = []
         self._pw_cm = async_playwright()
         self.browser: Browser | None = None
         self.page: Page | None = None
@@ -85,6 +88,8 @@ class BrowserFetcher:
         self.browser = await _launch(pw)
         context = await _new_context(self.browser, self.ctx)
         self.page = await context.new_page()
+        if self.capture_json:
+            self.page.on("response", self._on_response)
         if self.ctx.auth_type == "form" and not self.ctx.storage_state:
             await _do_login(self.page, self.ctx, self.fetch_config.timeout * 1000)
         return self
@@ -94,8 +99,28 @@ class BrowserFetcher:
             await self.browser.close()
         await self._pw_cm.__aexit__(None, None, None)
 
+    async def _on_response(self, resp: Response) -> None:
+        if resp.request.resource_type not in ("xhr", "fetch"):
+            return
+        if "json" not in (resp.headers.get("content-type") or ""):
+            return
+        try:
+            body = await resp.body()
+            if len(body) > 2_000_000:
+                return
+            data = json.loads(body)
+        except Exception:
+            return
+        self._json.append({"url": resp.url, "method": resp.request.method, "data": data})
+
+    async def screenshot(self) -> bytes | None:
+        if not self.page:
+            return None
+        return await self.page.screenshot(full_page=False, type="png")
+
     async def _load(self, url: str) -> Fetched:
         assert self.page
+        self._json = []
         cfg = self.fetch_config
         timeout = cfg.timeout * 1000
         resp = await self.page.goto(url, timeout=timeout, wait_until="domcontentloaded")
@@ -113,7 +138,10 @@ class BrowserFetcher:
                     break
         if cfg.wait_ms:
             await self.page.wait_for_timeout(cfg.wait_ms)
-        return Fetched(url=self.page.url, status=resp.status if resp else 0, html=await self.page.content())
+        return Fetched(
+            url=self.page.url, status=resp.status if resp else 0, html=await self.page.content(),
+            json_responses=list(self._json),
+        )
 
     async def fetch(self, url: str) -> Fetched:
         fetched = await self._load(url)

@@ -12,6 +12,7 @@ const router = createRouter({
         { path: 'lots', name: 'lots', component: () => import('./views/Lots.vue'), meta: { title: '拍品数据' } },
         { path: 'sources', name: 'sources', component: () => import('./views/Sources.vue'), meta: { title: '站点管理' } },
         { path: 'runs', name: 'runs', component: () => import('./views/Runs.vue'), meta: { title: '采集记录' } },
+        { path: 'settings', name: 'settings', component: () => import('./views/Settings.vue'), meta: { title: '系统设置' } },
       ],
     },
   ],

@@ -6,6 +6,7 @@
         <el-menu-item index="/lots"><el-icon><Goods /></el-icon>拍品数据</el-menu-item>
         <el-menu-item index="/sources"><el-icon><Link /></el-icon>站点管理</el-menu-item>
         <el-menu-item index="/runs"><el-icon><Document /></el-icon>采集记录</el-menu-item>
+        <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>
@@ -26,7 +27,7 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowDown, Document, Goods, Link } from '@element-plus/icons-vue'
+import { ArrowDown, Document, Goods, Link, Setting } from '@element-plus/icons-vue'
 import { me } from '../api'
 
 const route = useRoute()

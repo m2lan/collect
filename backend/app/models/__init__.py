@@ -1,3 +1,15 @@
-from app.models.entities import CrawlRun, Lot, PriceSnapshot, Rule, Source, User
+from app.models.entities import (
+    AIGeneration,
+    CrawlRun,
+    LLMProvider,
+    Lot,
+    PriceSnapshot,
+    Rule,
+    Source,
+    SystemSetting,
+    User,
+)
 
-__all__ = ["CrawlRun", "Lot", "PriceSnapshot", "Rule", "Source", "User"]
+__all__ = [
+    "AIGeneration", "CrawlRun", "LLMProvider", "Lot", "PriceSnapshot", "Rule", "Source", "SystemSetting", "User",
+]

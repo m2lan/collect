@@ -61,6 +61,19 @@
       </el-tab-pane>
 
       <el-tab-pane label="采集规则" name="rule">
+        <div v-if="aiAvailable" class="ai-bar">
+          <el-input v-model="aiHint" placeholder="给 AI 的补充要求（可选），如：还要抓保证金和围观人数" clearable />
+          <el-button type="warning" :loading="generating" @click="runAI">AI 生成规则</el-button>
+        </div>
+        <el-alert v-if="generating" type="info" :closable="false" style="margin-bottom: 8px"
+          title="AI 正在分析页面并生成规则，会自动试跑并修正，通常需要 20 秒到 2 分钟…" />
+        <el-alert v-if="aiResult" :type="aiResult.ok ? 'success' : 'warning'" :closable="false" style="margin-bottom: 8px"
+          :title="aiResult.ok ? `AI 已生成规则（${aiResult.rounds} 轮，抽取到 ${aiResult.count} 条），保存后生效` : 'AI 未能生成完全可用的规则，以下是最佳结果，请检查后调整'">
+          <div style="white-space: pre-wrap">{{ aiResult.explanation }}</div>
+          <ul v-if="aiResult.problems.length" style="margin: 4px 0 0; padding-left: 18px">
+            <li v-for="p in aiResult.problems" :key="p">{{ p }}</li>
+          </ul>
+        </el-alert>
         <div class="toolbar">
           <el-button @click="ruleText = JSON.stringify(EXAMPLE_RULE, null, 2)">填入示例</el-button>
           <el-button @click="formatRule">格式化</el-button>
@@ -121,10 +134,10 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { activateRule, clearSession, createSource, listRules, preview, updateSource } from '../api'
+import { activateRule, aiGenerate, clearSession, createSource, getAISettings, listRules, preview, updateSource } from '../api'
 import { fmtTime } from '../format'
 
-const props = defineProps({ modelValue: Boolean, source: Object })
+const props = defineProps({ modelValue: Boolean, source: Object, aiDraft: Object })
 const emit = defineEmits(['update:modelValue', 'saved'])
 
 const EXAMPLE_RULE = {
@@ -158,6 +171,11 @@ const rules = ref([])
 const saving = ref(false)
 const previewing = ref(false)
 const previewResult = ref(null)
+const aiAvailable = ref(false)
+const aiHint = ref('')
+const generating = ref(false)
+const aiResult = ref(null)
+const generatedText = ref(null)
 
 const previewColumns = computed(() => {
   const cols = new Set()
@@ -180,7 +198,15 @@ async function init() {
   }
   headersText.value = s && Object.keys(s.headers || {}).length ? JSON.stringify(s.headers, null, 2) : ''
   ruleText.value = s?.active_rule ? JSON.stringify(s.active_rule, null, 2) : ''
+  aiResult.value = null
+  aiHint.value = ''
+  generatedText.value = null
+  if (props.aiDraft?.rule) {
+    applyAIResult(props.aiDraft)
+    tab.value = 'rule'
+  }
   rules.value = s ? await listRules(s.id) : []
+  aiAvailable.value = (await getAISettings()).available
 }
 
 function pickAuth(a) {
@@ -214,7 +240,29 @@ function payload() {
     auth,
     headers: parseJson(headersText.value, '请求头') || {},
     rule: parseJson(ruleText.value, '采集规则'),
+    rule_origin: generatedText.value !== null && ruleText.value === generatedText.value ? 'ai' : 'manual',
   }
+}
+
+async function runAI() {
+  if (!form.value.start_url) return ElMessage.warning('请先在"基本信息"中填写列表页链接')
+  const { rule, ...body } = payload()
+  generating.value = true
+  aiResult.value = null
+  try {
+    applyAIResult(await aiGenerate({ ...body, hint: aiHint.value || null, source_id: props.source?.id }))
+  } finally {
+    generating.value = false
+  }
+}
+
+function applyAIResult(r) {
+  aiResult.value = r
+  if (r.rule) {
+    ruleText.value = JSON.stringify(r.rule, null, 2)
+    generatedText.value = ruleText.value
+  }
+  previewResult.value = { pages: 1, count: r.count, items: r.items, errors: [] }
 }
 
 async function runPreview() {
@@ -260,4 +308,5 @@ async function logout() {
 
 <style scoped>
 .help p { margin: 4px 0; }
+.ai-bar { display: flex; gap: 8px; margin-bottom: 8px; }
 </style>

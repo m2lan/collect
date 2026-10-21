@@ -22,6 +22,8 @@ class Fetched:
     url: str
     status: int
     html: str
+    # 浏览器模式下捕获的 JSON 接口响应：[{"url", "method", "data"}]
+    json_responses: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -57,12 +59,12 @@ class Fetcher(Protocol):
 
 
 @asynccontextmanager
-async def open_fetcher(ctx: FetchContext, fetch: FetchConfig) -> AsyncIterator[Fetcher]:
+async def open_fetcher(ctx: FetchContext, fetch: FetchConfig, capture_json: bool = False) -> AsyncIterator[Fetcher]:
     mode = fetch.mode or ctx.fetch_mode
     if mode == "browser":
         from app.crawler.fetchers.browser import BrowserFetcher
 
-        async with BrowserFetcher(ctx, fetch) as f:
+        async with BrowserFetcher(ctx, fetch, capture_json=capture_json) as f:
             yield f
     else:
         from app.crawler.fetchers.static import StaticFetcher

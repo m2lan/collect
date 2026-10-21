@@ -59,6 +59,7 @@ class SourceBase(BaseModel):
 class SourceIn(SourceBase):
     auth: AuthIn = Field(default_factory=AuthIn)
     rule: RuleConfig | None = None
+    rule_origin: Literal["manual", "visual", "ai"] = "manual"
 
 
 class SourceOut(SourceBase):
@@ -166,3 +167,90 @@ class Page[T](BaseModel):
     total: int
     items: list[T]
 SourceOut.model_rebuild()
+
+
+class AISettings(BaseModel):
+    enabled: bool = False
+    daily_limit: int = Field(100, ge=0)
+    auto_repair: bool = False
+    max_rounds: int = Field(3, ge=1, le=6)
+
+
+class ProviderIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    protocol: Literal["openai", "anthropic"]
+    base_url: str | None = None
+    api_key: str | None = Field(None, description="为空表示保留原值")
+    model: str = Field(min_length=1)
+    max_tokens: int = Field(8192, ge=256, le=200_000)
+    temperature: float | None = Field(None, ge=0, le=2)
+    timeout: int = Field(120, ge=10, le=600)
+    supports_tools: bool = True
+    supports_vision: bool = False
+    is_default: bool = False
+    enabled: bool = True
+
+
+class ProviderOut(BaseModel):
+    id: int
+    name: str
+    protocol: str
+    base_url: str | None
+    api_key_masked: str
+    model: str
+    max_tokens: int
+    temperature: float | None
+    timeout: int
+    supports_tools: bool
+    supports_vision: bool
+    is_default: bool
+    enabled: bool
+    created_at: datetime
+
+
+class GenerateIn(BaseModel):
+    source_id: int | None = Field(None, description="已有站点：复用登录信息；apply=true 时直接保存为新规则版本并启用")
+    start_url: HttpUrl
+    fetch_mode: FetchMode = "browser"
+    headers: dict[str, str] = Field(default_factory=dict)
+    auth_type: AuthType = "none"
+    auth: AuthIn = Field(default_factory=AuthIn)
+    hint: str | None = Field(None, max_length=2000)
+    provider_id: int | None = None
+    apply: bool = False
+
+
+class GenerateOut(BaseModel):
+    generation_id: int
+    ok: bool
+    rule: dict[str, Any] | None
+    explanation: str
+    problems: list[str]
+    items: list[dict[str, Any]]
+    count: int
+    rounds: int
+    prompt_tokens: int
+    completion_tokens: int
+    duration_ms: int
+    rule_version: int | None = None
+
+
+class GenerationOut(BaseModel):
+    id: int
+    source_id: int | None
+    provider_id: int | None
+    trigger: str
+    url: str
+    user_hint: str | None
+    status: str
+    rounds: int
+    item_count: int
+    result_rule_id: int | None
+    explanation: str | None
+    prompt_tokens: int
+    completion_tokens: int
+    duration_ms: int
+    error: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

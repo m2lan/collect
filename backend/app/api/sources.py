@@ -118,7 +118,7 @@ async def create_source(body: SourceIn, session: SessionDep) -> SourceOut:
     session.add(source)
     await session.flush()
     if body.rule:
-        await _add_rule(session, source.id, RuleIn(config=body.rule))
+        await _add_rule(session, source.id, RuleIn(config=body.rule), body.rule_origin)
     await session.commit()
     return await _source_out(session, source)
 
@@ -137,7 +137,7 @@ async def update_source(source_id: int, body: SourceIn, session: SessionDep) -> 
     if body.rule:
         active = await session.scalar(select(Rule).where(Rule.source_id == source_id, Rule.is_active))
         if active is None or active.config != body.rule.model_dump(by_alias=True):
-            await _add_rule(session, source_id, RuleIn(config=body.rule))
+            await _add_rule(session, source_id, RuleIn(config=body.rule), body.rule_origin)
     await session.commit()
     return await _source_out(session, source)
 
@@ -199,20 +199,24 @@ async def activate_rule(source_id: int, rule_id: int, session: SessionDep) -> Ru
     return rule
 
 
-@preview_router.post("/preview", response_model=PreviewOut)
-async def preview(body: PreviewIn, session: SessionDep) -> PreviewOut:
-    """按当前（未保存的）配置试跑，不写入数据库。"""
+def build_context(body: PreviewIn | Any, source: Source | None) -> FetchContext:
+    """用表单中（可能未保存）的配置构造抓取上下文；编辑已有站点时复用其已保存的凭据与会话。"""
     stored, storage_state = None, None
-    if body.source_id:
-        source = await _get_source(session, body.source_id)
-        if source.auth_type == body.auth_type:
-            stored = decrypt_json(source.auth_config)
-            storage_state = decrypt_json(source.storage_state)
-    ctx = FetchContext(
+    if source is not None and source.auth_type == body.auth_type:
+        stored = decrypt_json(source.auth_config)
+        storage_state = decrypt_json(source.storage_state)
+    return FetchContext(
         start_url=str(body.start_url), fetch_mode=body.fetch_mode, headers=body.headers,
         auth_type=body.auth_type, auth_config=merge_auth(body.auth_type, body.auth, stored),
         storage_state=storage_state,
     )
+
+
+@preview_router.post("/preview", response_model=PreviewOut)
+async def preview(body: PreviewIn, session: SessionDep) -> PreviewOut:
+    """按当前（未保存的）配置试跑，不写入数据库。"""
+    source = await _get_source(session, body.source_id) if body.source_id else None
+    ctx = build_context(body, source)
     try:
         result = await crawl(ctx, body.rule, rate_limit=2, max_pages=body.max_pages)
     except LoginError as exc:

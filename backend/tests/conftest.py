@@ -6,7 +6,8 @@ _tmp = tempfile.mkdtemp()
 os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL") or f"sqlite+aiosqlite:///{_tmp}/test.db"
 os.environ["REDIS_URL"] = ""
 os.environ["SECRET_KEY"] = "test-secret-key-for-unit-tests-only-32b"
-os.environ.setdefault("BROWSER_EXECUTABLE_PATH", "")
+if os.path.exists("/opt/pw-browsers/chromium"):
+    os.environ.setdefault("BROWSER_EXECUTABLE_PATH", "/opt/pw-browsers/chromium")
 
 import pytest  # noqa: E402
 

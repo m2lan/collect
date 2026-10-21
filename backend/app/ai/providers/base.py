@@ -1,0 +1,70 @@
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+
+class LLMError(Exception):
+    pass
+
+
+@dataclass
+class Message:
+    role: str  # user / assistant
+    content: str
+    images: list[bytes] = field(default_factory=list)  # PNG，仅 user 消息、支持视觉的模型使用
+
+
+@dataclass
+class LLMResult:
+    data: dict[str, Any]
+    raw_text: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+@dataclass
+class ProviderConfig:
+    protocol: str
+    model: str
+    api_key: str
+    base_url: str | None = None
+    max_tokens: int = 8192
+    temperature: float | None = None
+    timeout: float = 120
+    supports_tools: bool = True
+    supports_vision: bool = False
+
+
+class LLMProvider(Protocol):
+    config: ProviderConfig
+
+    async def generate_structured(
+        self, system: str, messages: list[Message], schema: dict[str, Any], tool_name: str, tool_description: str
+    ) -> LLMResult: ...
+
+
+_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
+
+
+def parse_json_text(text: str) -> dict[str, Any]:
+    """从模型的文本回复中提取 JSON 对象（兼容 ```json 代码块和裸 JSON）。"""
+    candidates = [m.group(1) for m in _FENCE.finditer(text)]
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start : end + 1])
+    for c in candidates:
+        try:
+            data = json.loads(c)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise LLMError(f"模型未返回合法的 JSON：{text[:300]}")
+
+
+def json_instruction(schema: dict[str, Any]) -> str:
+    return (
+        "\n\n请只输出一个 JSON 对象（可放在 ```json 代码块中），不要输出其他内容。JSON Schema 如下：\n"
+        + json.dumps(schema, ensure_ascii=False)
+    )
