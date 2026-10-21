@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select, update
 
-from app.api import ai, auth, lots, runs, sources
+from app.api import ai, auth, lots, runs, sources, system
 from app.api.deps import superuser
 from app.config import get_settings
 from app.db import SessionLocal
@@ -59,6 +59,7 @@ api.include_router(sources.preview_router, dependencies=protected)
 api.include_router(lots.router, dependencies=protected)
 api.include_router(runs.router, dependencies=protected)
 api.include_router(ai.router, dependencies=protected)
+api.include_router(system.router, dependencies=protected)
 app.include_router(api)
 
 

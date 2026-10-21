@@ -77,7 +77,8 @@ async def _source_out(session: SessionDep, source: Source) -> SourceOut:
     return SourceOut(
         id=source.id, name=source.name, start_url=source.start_url, fetch_mode=source.fetch_mode,
         headers=source.headers or {}, auth_type=source.auth_type, rate_limit=source.rate_limit,
-        enabled=source.enabled, created_at=source.created_at, auth=_auth_out(source),
+        enabled=source.enabled, allow_ai_repair=source.allow_ai_repair, created_at=source.created_at,
+        auth=_auth_out(source), health=source.health, health_message=source.health_message,
         active_rule=rule.config if rule else None, active_rule_version=rule.version if rule else None,
         lot_count=lot_count or 0, last_run=RunOut.model_validate(last_run) if last_run else None,
     )
@@ -119,7 +120,7 @@ async def create_source(body: SourceIn, session: SessionDep) -> SourceOut:
     source = Source(
         name=body.name, start_url=str(body.start_url), fetch_mode=body.fetch_mode, headers=body.headers,
         auth_type=body.auth_type, rate_limit=body.rate_limit, enabled=body.enabled,
-        auth_config=encrypt_json(merge_auth(body.auth_type, body.auth, None)),
+        allow_ai_repair=body.allow_ai_repair, auth_config=encrypt_json(merge_auth(body.auth_type, body.auth, None)),
     )
     session.add(source)
     await session.flush()
@@ -137,13 +138,14 @@ async def update_source(source_id: int, body: SourceIn, session: SessionDep) -> 
     if new_auth != (decrypt_json(source.auth_config) or {}):
         source.storage_state = None  # 登录信息变化后旧会话失效
     source.auth_config = encrypt_json(new_auth)
-    for field in ("name", "fetch_mode", "headers", "auth_type", "rate_limit", "enabled"):
+    for field in ("name", "fetch_mode", "headers", "auth_type", "rate_limit", "enabled", "allow_ai_repair"):
         setattr(source, field, getattr(body, field))
     source.start_url = str(body.start_url)
     if body.rule:
         active = await session.scalar(select(Rule).where(Rule.source_id == source_id, Rule.is_active))
         if active is None or active.config != body.rule.model_dump(by_alias=True):
             await _add_rule(session, source_id, RuleIn(config=body.rule), body.rule_origin)
+            source.health, source.health_message, source.consecutive_failures = "ok", None, 0
     await session.commit()
     return await _source_out(session, source)
 

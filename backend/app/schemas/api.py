@@ -54,6 +54,7 @@ class SourceBase(BaseModel):
     auth_type: AuthType = "none"
     rate_limit: float = Field(1.0, gt=0, le=20)
     enabled: bool = True
+    allow_ai_repair: bool = True
 
 
 class SourceIn(SourceBase):
@@ -68,6 +69,8 @@ class SourceOut(SourceBase):
     active_rule: dict[str, Any] | None = None
     active_rule_version: int | None = None
     lot_count: int = 0
+    health: str = "ok"
+    health_message: str | None = None
     last_run: "RunOut | None" = None
     created_at: datetime
 
@@ -203,6 +206,12 @@ class AISettings(BaseModel):
     daily_limit: int = Field(100, ge=0)
     auto_repair: bool = False
     max_rounds: int = Field(3, ge=1, le=6)
+
+
+class AlertSettings(BaseModel):
+    failure_threshold: int = Field(2, ge=1, le=20)
+    webhook_type: Literal["none", "generic", "wecom", "dingtalk", "feishu"] = "none"
+    webhook_url: str = ""
 
 
 class ProviderIn(BaseModel):

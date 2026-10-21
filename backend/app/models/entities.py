@@ -45,6 +45,11 @@ class Source(Base):
     storage_state: Mapped[str | None] = mapped_column(Text)
     rate_limit: Mapped[float] = mapped_column(Float, default=1.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 规则健康状况：ok / warning（字段缺失较多）/ broken（连续采集失败）
+    health: Mapped[str] = mapped_column(String(16), default="ok", server_default="ok")
+    health_message: Mapped[str | None] = mapped_column(Text)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    allow_ai_repair: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     rules: Mapped[list["Rule"]] = relationship(back_populates="source", cascade="all, delete-orphan")

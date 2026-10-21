@@ -19,6 +19,15 @@
         <el-option label="出价次数最多" value="-bid_count" />
       </el-select>
       <el-button type="primary" @click="search">查询</el-button>
+      <el-dropdown style="margin-left: auto" @command="doExport">
+        <el-button :loading="exporting">导出<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="xlsx">导出 Excel</el-dropdown-item>
+            <el-dropdown-item command="csv">导出 CSV</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
 
     <el-table :data="rows" v-loading="loading" @row-click="openDetail" style="cursor: pointer">
@@ -78,6 +87,9 @@
         <el-descriptions-item label="最近采集">{{ fmtTime(detail.last_seen_at) }}</el-descriptions-item>
         <el-descriptions-item v-for="(v, k) in detail.extra" :key="k" :label="k">{{ v }}</el-descriptions-item>
       </el-descriptions>
+      <h4>价格走势</h4>
+      <PriceChart v-if="detail.snapshots.length > 1" :snapshots="detail.snapshots" :currency="detail.currency" />
+      <div v-else class="muted">价格变化两次以上后显示走势图</div>
       <h4>价格变化记录</h4>
       <el-table :data="[...detail.snapshots].reverse()" size="small">
         <el-table-column label="时间"><template #default="{ row }">{{ fmtTime(row.captured_at) }}</template></el-table-column>
@@ -91,8 +103,10 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
-import { getLot, listLots, listSources } from '../api'
+import { ArrowDown } from '@element-plus/icons-vue'
+import { exportLots, getLot, listLots, listSources } from '../api'
 import { STATUS, fmtPrice, fmtTime } from '../format'
+import PriceChart from '../components/PriceChart.vue'
 
 const q = reactive({ source_id: null, status: null, keyword: '', min_price: null, max_price: null, sort: '-last_seen_at', page: 1, page_size: 20 })
 const rows = ref([])
@@ -101,6 +115,25 @@ const loading = ref(false)
 const sources = ref([])
 const detail = ref(null)
 const detailVisible = ref(false)
+const exporting = ref(false)
+
+async function doExport(format) {
+  exporting.value = true
+  try {
+    const { page, page_size, ...filters } = q
+    const params = Object.fromEntries(Object.entries({ ...filters, format }).filter(([, v]) => v !== null && v !== ''))
+    const blob = await exportLots(params)
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    const p = (n) => String(n).padStart(2, '0')
+    const d = new Date()
+    a.download = `拍品数据_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.${format}`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  } finally {
+    exporting.value = false
+  }
+}
 
 async function load() {
   loading.value = true

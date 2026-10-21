@@ -36,6 +36,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send("", 302, {"Location": "/login"})
             page = parse_qs(url.query).get("page", ["1"])[0]
             html = fixture_html(f"list_page{page}.html").replace("<body>", '<body><div id="user">我的</div>', 1)
+            if getattr(self.server, "dynamic", False) and page == "1":
+                # 每次访问第 1 页，进行中拍品价格上涨 500、出价次数 +1
+                self.server.hits += 1
+                n = self.server.hits
+                html = html.replace("¥12,500.00", f"¥{12500 + 500 * n:,}.00").replace("出价 18 次", f"出价 {18 + n} 次")
             return self._send(html)
         self._send("not found", 404)
 
@@ -47,8 +52,10 @@ class Handler(BaseHTTPRequestHandler):
         self._send(LOGIN_PAGE, 401)
 
 
-def start(require_login: bool = False) -> tuple[ThreadingHTTPServer, str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+def start(require_login: bool = False, dynamic: bool = False, port: int = 0) -> tuple[ThreadingHTTPServer, str]:
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.require_login = require_login  # type: ignore[attr-defined]
+    server.dynamic = dynamic  # type: ignore[attr-defined]
+    server.hits = 0  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_port}"

@@ -11,6 +11,9 @@ DEFAULTS: dict[str, Any] = {
     "ai.daily_limit": 100,  # 每日最多调用 AI 生成次数，0 表示不限
     "ai.auto_repair": False,  # 规则失效时自动调用 AI 修复并直接启用
     "ai.max_rounds": 3,  # 生成 + 自我修正的最大轮数
+    "alert.failure_threshold": 2,  # 连续失败多少次判定规则失效
+    "alert.webhook_type": "none",  # none / generic / wecom / dingtalk / feishu
+    "alert.webhook_url": "",
 }
 
 

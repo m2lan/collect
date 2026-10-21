@@ -22,6 +22,13 @@
         <template #default="{ row }">{{ row.active_rule_version ? `v${row.active_rule_version}` : '未配置' }}</template>
       </el-table-column>
       <el-table-column label="拍品数" prop="lot_count" width="80" />
+      <el-table-column label="健康" width="80">
+        <template #default="{ row }">
+          <el-tooltip :disabled="!row.health_message" :content="row.health_message || ''" placement="top">
+            <el-tag :type="HEALTH[row.health].type" size="small">{{ HEALTH[row.health].label }}</el-tag>
+          </el-tooltip>
+        </template>
+      </el-table-column>
       <el-table-column label="最近采集" width="170">
         <template #default="{ row }">
           <template v-if="row.last_run">
@@ -80,6 +87,7 @@ import { RUN_STATUS, fmtTime } from '../format'
 import SourceDialog from '../components/SourceDialog.vue'
 
 const AUTH_LABEL = { none: '无需登录', cookie: 'Cookie', form: '账号密码' }
+const HEALTH = { ok: { label: '正常', type: 'success' }, warning: { label: '异常', type: 'warning' }, broken: { label: '失效', type: 'danger' } }
 const router = useRouter()
 const rows = ref([])
 const loading = ref(false)

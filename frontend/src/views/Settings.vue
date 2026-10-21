@@ -27,6 +27,31 @@
   </el-card>
 
   <el-card style="margin-top: 16px">
+    <template #header><b>告警通知</b></template>
+    <el-form :model="alert" label-width="150px" style="max-width: 760px">
+      <el-form-item label="失效判定">
+        连续失败 <el-input-number v-model="alert.failure_threshold" :min="1" :max="20" size="small" style="margin: 0 8px" /> 次判定规则失效
+      </el-form-item>
+      <el-form-item label="通知方式">
+        <el-select v-model="alert.webhook_type" style="width: 200px">
+          <el-option label="不通知" value="none" />
+          <el-option label="企业微信群机器人" value="wecom" />
+          <el-option label="钉钉群机器人" value="dingtalk" />
+          <el-option label="飞书群机器人" value="feishu" />
+          <el-option label="通用 Webhook（JSON）" value="generic" />
+        </el-select>
+      </el-form-item>
+      <el-form-item v-if="alert.webhook_type !== 'none'" label="Webhook 地址">
+        <el-input v-model="alert.webhook_url" placeholder="https://..." />
+      </el-form-item>
+      <el-form-item>
+        <el-button type="primary" @click="saveAlert">保存</el-button>
+        <el-button v-if="alert.webhook_type !== 'none'" :loading="alertTesting" @click="sendTestAlert">发送测试消息</el-button>
+      </el-form-item>
+    </el-form>
+  </el-card>
+
+  <el-card style="margin-top: 16px">
     <template #header>
       <div class="page-header" style="margin: 0">
         <b>模型配置</b>
@@ -131,8 +156,8 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  aiUsage, createProvider, deleteProvider, getAISettings, listGenerations, listProviders,
-  putAISettings, testProvider, updateProvider,
+  aiUsage, createProvider, deleteProvider, getAISettings, getAlertSettings, listGenerations, listProviders,
+  putAISettings, putAlertSettings, testAlert, testProvider, updateProvider,
 } from '../api'
 import { fmtTime } from '../format'
 
@@ -157,11 +182,30 @@ const providerVisible = ref(false)
 const editing = ref(null)
 const pf = ref({})
 const testing = ref(null)
+const alert = ref({ failure_threshold: 2, webhook_type: 'none', webhook_url: '' })
+const alertTesting = ref(false)
+
+async function saveAlert() {
+  alert.value = await putAlertSettings(alert.value)
+  ElMessage.success('已保存')
+}
+
+async function sendTestAlert() {
+  alertTesting.value = true
+  try {
+    const r = await testAlert(alert.value)
+    if (r.ok) ElMessage.success('测试消息已发送')
+    else ElMessageBox.alert(r.message, '发送失败', { type: 'error' })
+  } finally {
+    alertTesting.value = false
+  }
+}
 
 const baseUrlSuggestions = (q, cb) => cb(BASE_URLS[pf.value.protocol].filter((u) => !q || u.includes(q)).map((value) => ({ value })))
 
 async function load() {
   ai.value = await getAISettings()
+  alert.value = await getAlertSettings()
   providers.value = await listProviders()
   usage.value = await aiUsage()
   loadGenerations()

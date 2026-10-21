@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.crawler.extractor import extract_page, page_urls
 from app.crawler.fetchers import FetchContext, open_fetcher
+from app.crawler.health import update_health
 from app.crawler.pipeline import upsert_lots
 from app.db import SessionLocal
 from app.models import CrawlRun, Rule, Source
@@ -103,8 +104,18 @@ def context_for(source: Source) -> FetchContext:
     )
 
 
+async def maybe_auto_repair(source_id: int) -> None:
+    from app.ai.repair import auto_repair
+
+    try:
+        await auto_repair(source_id)
+    except Exception:
+        log.exception("auto repair for source %s failed", source_id)
+
+
 async def run_crawl(run_id: int) -> None:
     runlog = RunLog()
+    items: list[dict[str, Any]] | None = None
     async with SessionLocal() as session:
         run = await session.get(CrawlRun, run_id)
         if run is None:
@@ -129,6 +140,7 @@ async def run_crawl(run_id: int) -> None:
 
             ctx.on_storage_state = save_state
             result = await crawl(ctx, config, source.rate_limit, runlog=runlog)
+            items = result.items
             stats = await upsert_lots(session, source.id, run.id, result.items, config.list.unique_key)
             run.pages = result.pages
             run.items_found = len(result.items)
@@ -148,5 +160,13 @@ async def run_crawl(run_id: int) -> None:
             run.status, run.error = "failed", f"{type(exc).__name__}: {exc}"[:4000]
             runlog.error(run.error)
         run.finished_at = utcnow()
+        needs_repair = False
+        source = await session.get(Source, run.source_id)
+        if source is not None:
+            needs_repair = await update_health(session, source, run, items)
+            if source.health != "ok":
+                runlog.warn(f"规则健康状态：{source.health}，{source.health_message}")
         run.log = runlog.entries
         await session.commit()
+        if needs_repair and source is not None:
+            await maybe_auto_repair(source.id)

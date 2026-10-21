@@ -19,6 +19,10 @@
             <el-input v-model="headersText" type="textarea" :rows="3" class="mono" placeholder='{"Referer": "https://..."}' />
           </el-form-item>
           <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>
+          <el-form-item label="AI 自动修复">
+            <el-switch v-model="form.allow_ai_repair" />
+            <span class="muted" style="margin-left: 12px">规则失效时允许 AI 重新生成并启用（需在系统设置中开启）</span>
+          </el-form-item>
         </el-form>
       </el-tab-pane>
 
@@ -221,6 +225,7 @@ async function init() {
     fetch_mode: s?.fetch_mode || 'static',
     rate_limit: s?.rate_limit ?? 1,
     enabled: s?.enabled ?? true,
+    allow_ai_repair: s?.allow_ai_repair ?? true,
     auth_type: s?.auth_type || 'none',
     auth: { ...emptyAuth(), ...pickAuth(s?.auth) },
   }

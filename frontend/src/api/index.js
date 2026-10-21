@@ -34,3 +34,12 @@ export const snapshot = (body) => http.post('/snapshot', body)
 export const getRun = (id) => http.get(`/runs/${id}`)
 export const listSchedules = (id) => http.get(`/sources/${id}/schedules`)
 export const saveSchedules = (id, body) => http.put(`/sources/${id}/schedules`, body)
+
+export const getAlertSettings = () => http.get('/settings/alert')
+export const putAlertSettings = (body) => http.put('/settings/alert', body)
+export const testAlert = (body) => http.post('/settings/alert/test', body)
+
+export async function exportLots(params) {
+  const resp = await http.get('/lots/export', { params, responseType: 'blob', timeout: 600000 })
+  return resp
+}
