@@ -19,6 +19,9 @@
       </el-table-column>
       <el-table-column label="开始时间" width="150"><template #default="{ row }">{{ fmtTime(row.started_at) }}</template></el-table-column>
       <el-table-column label="耗时" width="80"><template #default="{ row }">{{ duration(row) }}</template></el-table-column>
+      <el-table-column label="类型" width="90">
+        <template #default="{ row }">{{ row.trigger === 'cron' ? '定时' : '手动' }}{{ row.kind === 'live' ? '·盯价' : '' }}</template>
+      </el-table-column>
       <el-table-column label="错误信息" min-width="220">
         <template #default="{ row }">
           <el-tooltip v-if="row.error" :content="row.error" placement="top" popper-class="run-error">
@@ -26,18 +29,30 @@
           </el-tooltip>
         </template>
       </el-table-column>
+      <el-table-column label="" width="70">
+        <template #default="{ row }"><el-button link type="primary" @click="openLog(row)">日志</el-button></template>
+      </el-table-column>
     </el-table>
     <el-pagination
       style="margin-top: 12px; justify-content: flex-end" layout="total, prev, pager, next"
       :total="total" v-model:current-page="page" :page-size="20" @current-change="load"
     />
   </el-card>
+
+  <el-drawer v-model="logVisible" :title="`采集日志 #${logRun?.id || ''}`" size="640px">
+    <div v-if="logRun" class="log">
+      <div v-for="(e, i) in logRun.log" :key="i" :class="['line', e.level]">
+        <span class="t">{{ fmtTime(e.t) }}</span>{{ e.msg }}
+      </div>
+      <div v-if="!logRun.log?.length" class="muted">暂无日志</div>
+    </div>
+  </el-drawer>
 </template>
 
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { listRuns, listSources } from '../api'
+import { getRun, listRuns, listSources } from '../api'
 import { RUN_STATUS, fmtTime } from '../format'
 
 const route = useRoute()
@@ -47,7 +62,14 @@ const rows = ref([])
 const total = ref(0)
 const page = ref(1)
 const loading = ref(false)
+const logVisible = ref(false)
+const logRun = ref(null)
 let timer
+
+async function openLog(row) {
+  logRun.value = await getRun(row.id)
+  logVisible.value = true
+}
 
 const sourceName = (id) => sources.value.find((s) => s.id === id)?.name || `#${id}`
 const duration = (r) => (r.started_at && r.finished_at ? `${Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000)}s` : '-')
@@ -80,6 +102,10 @@ onUnmounted(() => clearInterval(timer))
 </script>
 
 <style scoped>
+.log { font-family: Menlo, Consolas, monospace; font-size: 12px; line-height: 1.7; }
+.line .t { color: #909399; margin-right: 8px; }
+.line.warn { color: #e6a23c; }
+.line.error { color: #f56c6c; }
 .error { color: #f56c6c; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 </style>
 <style>

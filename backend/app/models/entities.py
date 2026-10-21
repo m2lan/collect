@@ -4,7 +4,6 @@ from typing import Any
 
 from sqlalchemy import (
     Boolean,
-    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -15,7 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db import Base, JSONType
+from app.db import Base, JSONType, UTCDateTime
 
 
 def utcnow() -> datetime:
@@ -29,7 +28,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class Source(Base):
@@ -46,7 +45,7 @@ class Source(Base):
     storage_state: Mapped[str | None] = mapped_column(Text)
     rate_limit: Mapped[float] = mapped_column(Float, default=1.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     rules: Mapped[list["Rule"]] = relationship(back_populates="source", cascade="all, delete-orphan")
 
@@ -62,7 +61,7 @@ class Rule(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     origin: Mapped[str] = mapped_column(String(16), default="manual")
     note: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     source: Mapped[Source] = relationship(back_populates="rules")
 
@@ -74,15 +73,17 @@ class CrawlRun(Base):
     source_id: Mapped[int] = mapped_column(ForeignKey("source.id", ondelete="CASCADE"), index=True)
     rule_version: Mapped[int | None] = mapped_column(Integer)
     trigger: Mapped[str] = mapped_column(String(16), default="manual")
+    kind: Mapped[str] = mapped_column(String(16), default="full")
     status: Mapped[str] = mapped_column(String(16), default="pending")
     pages: Mapped[int] = mapped_column(Integer, default=0)
     items_found: Mapped[int] = mapped_column(Integer, default=0)
     items_new: Mapped[int] = mapped_column(Integer, default=0)
     items_updated: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    log: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class Lot(Base):
@@ -101,11 +102,11 @@ class Lot(Base):
     currency: Mapped[str | None] = mapped_column(String(8))
     bid_count: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str | None] = mapped_column(String(16), index=True)
-    start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    start_time: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    end_time: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     extra: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
 
 class PriceSnapshot(Base):
@@ -117,7 +118,7 @@ class PriceSnapshot(Base):
     price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
     bid_count: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str | None] = mapped_column(String(16))
-    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    captured_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class LLMProvider(Base):
@@ -134,7 +135,7 @@ class LLMProvider(Base):
     supports_vision: Mapped[bool] = mapped_column(Boolean, default=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
 class AIGeneration(Base):
@@ -156,7 +157,7 @@ class AIGeneration(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
 
 class SystemSetting(Base):
@@ -164,3 +165,18 @@ class SystemSetting(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[Any] = mapped_column(JSONType)
+
+
+class Schedule(Base):
+    """定时任务。kind=full：完整采集；kind=live：只刷新进行中的拍品（盯价）。"""
+
+    __tablename__ = "schedule"
+    __table_args__ = (UniqueConstraint("source_id", "kind"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("source.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="full")
+    cron: Mapped[str] = mapped_column(String(64))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

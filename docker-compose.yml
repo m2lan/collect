@@ -4,6 +4,7 @@ x-backend-env: &backend-env
   SECRET_KEY: ${SECRET_KEY:?请在 .env 中设置 SECRET_KEY}
   ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+  TIMEZONE: ${TIMEZONE:-Asia/Shanghai}
 
 services:
   postgres:
@@ -39,6 +40,14 @@ services:
     depends_on:
       api: { condition: service_started }
     shm_size: 1gb
+    restart: unless-stopped
+
+  scheduler:
+    build: ./backend
+    command: python -m app.scheduler
+    environment: *backend-env
+    depends_on:
+      api: { condition: service_started }
     restart: unless-stopped
 
   web:

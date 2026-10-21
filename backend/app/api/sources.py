@@ -7,8 +7,11 @@ from app.api.deps import SessionDep
 from app.crawler.cookies import parse_cookies
 from app.crawler.fetchers import FetchContext, LoginError
 from app.crawler.pipeline import jsonable
+from app.crawler.fetchers import open_fetcher
 from app.crawler.runner import crawl
-from app.models import CrawlRun, Lot, Rule, Source
+from app.crawler.snapshot import sanitize_snapshot
+from app.schemas.rule import FetchConfig
+from app.models import CrawlRun, Lot, Rule, Schedule, Source
 from app.schemas.api import (
     AuthIn,
     AuthOut,
@@ -17,6 +20,9 @@ from app.schemas.api import (
     RuleIn,
     RuleOut,
     RunOut,
+    ScheduleIn,
+    ScheduleOut,
+    SnapshotIn,
     SourceIn,
     SourceOut,
 )
@@ -173,6 +179,37 @@ async def clear_session(source_id: int, session: SessionDep) -> None:
     await session.commit()
 
 
+@router.get("/{source_id}/schedules", response_model=list[ScheduleOut])
+async def list_schedules(source_id: int, session: SessionDep) -> list[Schedule]:
+    await _get_source(session, source_id)
+    return list((await session.scalars(select(Schedule).where(Schedule.source_id == source_id).order_by(Schedule.kind))).all())
+
+
+@router.put("/{source_id}/schedules", response_model=list[ScheduleOut])
+async def save_schedules(source_id: int, body: list[ScheduleIn], session: SessionDep) -> list[Schedule]:
+    """整体保存站点的定时任务（每种 kind 至多一个，未提交的 kind 会被删除）。"""
+    from app.scheduler import next_fire, validate_cron
+
+    await _get_source(session, source_id)
+    if len({s.kind for s in body}) != len(body):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "同一类型的定时任务只能有一个")
+    existing = {s.kind: s for s in (await session.scalars(select(Schedule).where(Schedule.source_id == source_id))).all()}
+    for item in body:
+        try:
+            validate_cron(item.cron)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        sch = existing.pop(item.kind, None) or Schedule(source_id=source_id, kind=item.kind)
+        if sch.cron != item.cron or sch.next_run_at is None or not sch.enabled:
+            sch.next_run_at = next_fire(item.cron)
+        sch.cron, sch.enabled = item.cron, item.enabled
+        session.add(sch)
+    for sch in existing.values():
+        await session.delete(sch)
+    await session.commit()
+    return await list_schedules(source_id, session)
+
+
 @router.get("/{source_id}/rules", response_model=list[RuleOut])
 async def list_rules(source_id: int, session: SessionDep) -> list[Rule]:
     await _get_source(session, source_id)
@@ -225,3 +262,19 @@ async def preview(body: PreviewIn, session: SessionDep) -> PreviewOut:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"抓取失败: {type(exc).__name__}: {exc}") from exc
     items = [{k: jsonable(v) for k, v in item.items()} for item in result.items[:100]]
     return PreviewOut(pages=result.pages, count=len(result.items), items=items, errors=result.errors[:20])
+
+
+@preview_router.post("/snapshot")
+async def snapshot(body: SnapshotIn, session: SessionDep) -> dict:
+    """抓取页面并返回清洗后的 HTML（去除脚本），供可视化选取器在 iframe 中展示。"""
+    source = await _get_source(session, body.source_id) if body.source_id else None
+    ctx = build_context(body, source)
+    browser = body.fetch_mode == "browser"
+    try:
+        async with open_fetcher(ctx, FetchConfig(wait_ms=1500 if browser else 0, scroll=browser, timeout=45)) as fetcher:
+            fetched = await fetcher.fetch(ctx.start_url)
+    except LoginError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"抓取失败: {type(exc).__name__}: {exc}") from exc
+    return {"url": fetched.url, "html": sanitize_snapshot(fetched.html, fetched.url)}

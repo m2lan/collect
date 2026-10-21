@@ -114,6 +114,7 @@ class RunOut(BaseModel):
     source_id: int
     rule_version: int | None
     trigger: str
+    kind: str = "full"
     status: str
     pages: int
     items_found: int
@@ -125,6 +126,34 @@ class RunOut(BaseModel):
     finished_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+
+class RunDetailOut(RunOut):
+    log: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ScheduleIn(BaseModel):
+    kind: Literal["full", "live"] = "full"
+    cron: str = Field(min_length=9, max_length=64, description="5 段 cron 表达式，如 0 */2 * * *")
+    enabled: bool = True
+
+
+class ScheduleOut(ScheduleIn):
+    id: int
+    source_id: int
+    next_run_at: datetime | None
+    last_run_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class SnapshotIn(BaseModel):
+    source_id: int | None = None
+    start_url: HttpUrl
+    fetch_mode: FetchMode = "static"
+    headers: dict[str, str] = Field(default_factory=dict)
+    auth_type: AuthType = "none"
+    auth: AuthIn = Field(default_factory=AuthIn)
 
 
 class LotOut(BaseModel):

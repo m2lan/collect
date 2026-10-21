@@ -3,7 +3,7 @@ from sqlalchemy import func, select
 
 from app.api.deps import SessionDep
 from app.models import CrawlRun
-from app.schemas.api import Page, RunOut
+from app.schemas.api import Page, RunDetailOut, RunOut
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -23,7 +23,7 @@ async def list_runs(
     return Page[RunOut](total=await session.scalar(count) or 0, items=[RunOut.model_validate(r) for r in runs])
 
 
-@router.get("/{run_id}", response_model=RunOut)
+@router.get("/{run_id}", response_model=RunDetailOut)
 async def get_run(run_id: int, session: SessionDep) -> CrawlRun:
     run = await session.get(CrawlRun, run_id)
     if run is None:

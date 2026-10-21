@@ -75,6 +75,7 @@
           </ul>
         </el-alert>
         <div class="toolbar">
+          <el-button type="primary" plain @click="openPicker">可视化选取</el-button>
           <el-button @click="ruleText = JSON.stringify(EXAMPLE_RULE, null, 2)">填入示例</el-button>
           <el-button @click="formatRule">格式化</el-button>
           <el-button type="success" :loading="previewing" @click="runPreview">试跑（第 1 页）</el-button>
@@ -105,6 +106,18 @@
         </template>
       </el-tab-pane>
 
+      <el-tab-pane label="定时采集" name="schedule">
+        <el-form label-width="120px">
+          <el-form-item label="定时完整采集">
+            <el-switch v-model="schedules.full.enabled" />
+          </el-form-item>
+          <el-form-item label="执行周期">
+            <CronInput v-model="schedules.full.cron" :disabled="!schedules.full.enabled" />
+            <div v-if="schedules.full.next_run_at" class="muted">下次执行：{{ fmtTime(schedules.full.next_run_at) }}</div>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
       <el-tab-pane v-if="source" label="规则版本" name="versions">
         <el-table :data="rules" size="small">
           <el-table-column label="版本" width="80"><template #default="{ row }">v{{ row.version }}</template></el-table-column>
@@ -129,13 +142,20 @@
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
     </template>
   </el-dialog>
+
+  <VisualPicker v-model="pickerVisible" :request="pickerRequest" :base-rule="pickerBase" @done="onPicked" />
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { activateRule, aiGenerate, clearSession, createSource, getAISettings, listRules, preview, updateSource } from '../api'
+import {
+  activateRule, aiGenerate, clearSession, createSource, getAISettings, listRules, listSchedules, preview,
+  saveSchedules, updateSource,
+} from '../api'
 import { fmtTime } from '../format'
+import CronInput from './CronInput.vue'
+import VisualPicker from './VisualPicker.vue'
 
 const props = defineProps({ modelValue: Boolean, source: Object, aiDraft: Object })
 const emit = defineEmits(['update:modelValue', 'saved'])
@@ -176,6 +196,14 @@ const aiHint = ref('')
 const generating = ref(false)
 const aiResult = ref(null)
 const generatedText = ref(null)
+const pickedText = ref(null)
+const pickerVisible = ref(false)
+const pickerRequest = ref(null)
+const pickerBase = ref(null)
+const emptySchedules = () => ({
+  full: { kind: 'full', enabled: false, cron: '0 */2 * * *', next_run_at: null },
+})
+const schedules = ref(emptySchedules())
 
 const previewColumns = computed(() => {
   const cols = new Set()
@@ -201,6 +229,13 @@ async function init() {
   aiResult.value = null
   aiHint.value = ''
   generatedText.value = null
+  pickedText.value = null
+  schedules.value = emptySchedules()
+  if (s) {
+    for (const sch of await listSchedules(s.id)) {
+      if (schedules.value[sch.kind]) schedules.value[sch.kind] = { ...sch }
+    }
+  }
   if (props.aiDraft?.rule) {
     applyAIResult(props.aiDraft)
     tab.value = 'rule'
@@ -240,7 +275,9 @@ function payload() {
     auth,
     headers: parseJson(headersText.value, '请求头') || {},
     rule: parseJson(ruleText.value, '采集规则'),
-    rule_origin: generatedText.value !== null && ruleText.value === generatedText.value ? 'ai' : 'manual',
+    rule_origin: generatedText.value !== null && ruleText.value === generatedText.value
+      ? 'ai'
+      : pickedText.value !== null && ruleText.value === pickedText.value ? 'visual' : 'manual',
   }
 }
 
@@ -277,12 +314,29 @@ async function runPreview() {
   }
 }
 
+function openPicker() {
+  if (!form.value.start_url) return ElMessage.warning('请先在"基本信息"中填写列表页链接')
+  const { rule, rule_origin, ...body } = payload()
+  pickerRequest.value = { ...body, source_id: props.source?.id }
+  pickerBase.value = rule
+  pickerVisible.value = true
+}
+
+function onPicked(rule) {
+  ruleText.value = JSON.stringify(rule, null, 2)
+  pickedText.value = ruleText.value
+  runPreview()
+}
+
 async function save() {
   const body = payload()
   saving.value = true
   try {
-    if (props.source) await updateSource(props.source.id, body)
-    else await createSource(body)
+    const saved = props.source ? await updateSource(props.source.id, body) : await createSource(body)
+    const list = Object.values(schedules.value)
+      .filter((s) => s.enabled || s.id)
+      .map(({ kind, cron, enabled }) => ({ kind, cron, enabled }))
+    await saveSchedules(saved.id, list)
     ElMessage.success('已保存')
     emit('update:modelValue', false)
     emit('saved')

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -12,6 +13,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models import CrawlRun, User
 from app.models.entities import utcnow
+from app.scheduler import run_scheduler
 from app.security import hash_password
 
 logging.basicConfig(level=logging.INFO)
@@ -35,7 +37,13 @@ async def init_admin() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await init_admin()
+    scheduler = None
+    if not get_settings().redis_url and get_settings().embedded_scheduler:
+        # 进程内模式：调度器随 API 启动；Redis 模式下由独立的 scheduler 服务负责
+        scheduler = asyncio.create_task(run_scheduler())
     yield
+    if scheduler:
+        scheduler.cancel()
 
 
 app = FastAPI(title="拍卖价格采集平台", lifespan=lifespan)

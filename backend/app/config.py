@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     browser_executable_path: str = ""
     browser_headless: bool = True
 
+    # 定时任务 cron 表达式按此时区解释
+    timezone: str = "Asia/Shanghai"
+    # 未配置 Redis 时是否在 API 进程内运行调度器
+    embedded_scheduler: bool = True
+
     cors_origins: list[str] = ["http://localhost:5173"]
 
 

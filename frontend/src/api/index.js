@@ -29,3 +29,8 @@ export const testProvider = (id) => http.post(`/ai/providers/${id}/test`)
 export const aiGenerate = (body) => http.post('/ai/generate', body, { timeout: 600000 })
 export const listGenerations = (params) => http.get('/ai/generations', { params })
 export const aiUsage = () => http.get('/ai/usage')
+
+export const snapshot = (body) => http.post('/snapshot', body)
+export const getRun = (id) => http.get(`/runs/${id}`)
+export const listSchedules = (id) => http.get(`/sources/${id}/schedules`)
+export const saveSchedules = (id, body) => http.put(`/sources/${id}/schedules`, body)
