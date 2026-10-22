@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.crawler.extractor import extract_captured, extract_detail, extract_page, page_urls
 from app.crawler.fetchers import FetchContext, Fetched, Fetcher, LoginError, open_fetcher
 from app.crawler.fetchers.base import USER_AGENTS
+from app.crawler.errors import classify_error
 from app.crawler.health import update_health
+from app.crawler.throttle import domain_of, throttle
 from app.crawler.pipeline import upsert_lots
 from app.db import SessionLocal
 from app.models import CrawlRun, Lot, Rule, Source
@@ -64,11 +66,15 @@ KnownKeys = Callable[[list[str]], Awaitable[set[str]]]
 
 
 async def fetch_with_retry(
-    fetcher: Fetcher, url: str, runlog: RunLog, method: str = "GET", body: dict[str, Any] | None = None
+    fetcher: Fetcher, url: str, runlog: RunLog, method: str = "GET", body: dict[str, Any] | None = None,
+    domain_interval: float = 0.0,
 ) -> Fetched:
-    """失败自动重试（指数退避 1s、2s），登录失败不重试。"""
+    """失败自动重试（指数退避 1s、2s），登录失败不重试；每次请求前按域名限速。"""
     for attempt in range(1, RETRIES + 1):
         try:
+            waited = await throttle(url, domain_interval)
+            if waited >= 1:
+                runlog.info(f"按域名限速等待 {waited:.1f}s（{domain_of(url)}）")
             return await fetcher.fetch(url, method, body)
         except LoginError:
             raise
@@ -138,7 +144,7 @@ async def crawl(
                 seen.add(key)
                 if result.pages and interval:
                     await asyncio.sleep(interval)
-                fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body)
+                fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body, ctx.domain_interval)
                 source = url + (f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else "")
             if fc.capture:
                 page = extract_captured(fetched.json_responses, fetched.url, config)
@@ -176,6 +182,7 @@ async def crawl(
                     break
                 if interval:
                     await asyncio.sleep(interval)
+                await throttle(fetched.url, ctx.domain_interval)
                 click_started = time.monotonic()
                 clicked = await fetcher.click_next(config.pagination.selector or "")  # type: ignore[attr-defined]
                 if clicked is None:
@@ -184,13 +191,13 @@ async def crawl(
             runlog.info(f"已达到最大页数 {limit}，停止翻页")
 
         if with_detail and config.detail.enabled and result.items:
-            await _crawl_details(fetcher, config, result, runlog, interval, known_keys)
+            await _crawl_details(fetcher, config, result, runlog, interval, known_keys, ctx.domain_interval)
     return result
 
 
 async def _crawl_details(
     fetcher: Fetcher, config: RuleConfig, result: CrawlResult, runlog: RunLog, interval: float,
-    known_keys: KnownKeys | None,
+    known_keys: KnownKeys | None, domain_interval: float = 0.0,
 ) -> None:
     detail = config.detail
     key_field = config.list.unique_key or "url"
@@ -209,7 +216,7 @@ async def _crawl_details(
             await asyncio.sleep(interval)
         url = str(it[detail.url_field])
         try:
-            fetched = await fetch_with_retry(fetcher, url, runlog)
+            fetched = await fetch_with_retry(fetcher, url, runlog, domain_interval=domain_interval)
         except LoginError:
             raise
         except Exception as exc:
@@ -231,6 +238,16 @@ async def network_options(session: AsyncSession, use_proxy: bool) -> tuple[str |
         proxy = random.choice(proxies) if proxies else None
     ua = random.choice(USER_AGENTS) if await get_setting(session, "crawler.random_ua") else USER_AGENTS[0]
     return proxy, ua
+
+
+async def apply_network(session: AsyncSession, ctx: FetchContext, use_proxy: bool) -> FetchContext:
+    """把代理、UA、指纹伪装、按域名限速等反爬设置应用到抓取上下文。"""
+    ctx.proxy, ctx.user_agent = await network_options(session, use_proxy)
+    if ctx.auth_config.get("user_agent"):
+        ctx.user_agent = ctx.auth_config["user_agent"]  # 人工登录会话与登录时的 UA 绑定
+    ctx.stealth = bool(await get_setting(session, "crawler.stealth"))
+    ctx.domain_interval = float(await get_setting(session, "crawler.domain_interval") or 0)
+    return ctx
 
 
 def context_for(source: Source) -> FetchContext:
@@ -293,7 +310,7 @@ async def _live_refresh(
             if i and interval:
                 await asyncio.sleep(interval)
             try:
-                fetched = await fetch_with_retry(fetcher, str(url), runlog)
+                fetched = await fetch_with_retry(fetcher, str(url), runlog, domain_interval=ctx.domain_interval)
             except LoginError:
                 raise
             except Exception as exc:
@@ -322,10 +339,7 @@ async def run_crawl(run_id: int) -> None:
                 raise RuntimeError("站点不存在或没有启用的规则")
             run.rule_version = rule.version
             config = RuleConfig.model_validate(rule.config)
-            ctx = context_for(source)
-            ctx.proxy, ctx.user_agent = await network_options(session, source.use_proxy)
-            if ctx.auth_config.get("user_agent"):
-                ctx.user_agent = ctx.auth_config["user_agent"]  # 人工登录会话与登录时的 UA 绑定
+            ctx = await apply_network(session, context_for(source), source.use_proxy)
             mode = config.fetch.mode or source.fetch_mode
             runlog.info(
                 f"开始{'盯价' if run.kind == 'live' else '采集'}：{source.name}，规则 v{rule.version}，抓取方式 {mode}"
@@ -381,6 +395,9 @@ async def run_crawl(run_id: int) -> None:
             run.status, run.error = "failed", f"{type(exc).__name__}: {exc}"[:4000]
             runlog.error(run.error)
         run.finished_at = utcnow()
+        if run.started_at:
+            run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
+        run.error_type = classify_error(run.error) if run.status == "failed" else None
         if run.status == "success":
             src = await session.get(Source, run.source_id)
             if src is not None and src.login_expired_at is not None:

@@ -5,6 +5,7 @@ x-backend-env: &backend-env
   ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
   ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
   TIMEZONE: ${TIMEZONE:-Asia/Shanghai}
+  BACKUP_DIR: /backups
 
 services:
   postgres:
@@ -28,6 +29,8 @@ services:
   api:
     build: ./backend
     environment: *backend-env
+    volumes:
+      - ./backups:/backups
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
@@ -48,6 +51,24 @@ services:
     environment: *backend-env
     depends_on:
       api: { condition: service_started }
+    restart: unless-stopped
+
+  backup:
+    image: postgres:16-alpine
+    entrypoint: ["sh", "/backup.sh"]
+    environment:
+      PGHOST: postgres
+      PGUSER: collect
+      PGPASSWORD: ${POSTGRES_PASSWORD:-collect}
+      PGDATABASE: collect
+      TZ: ${TIMEZONE:-Asia/Shanghai}
+      BACKUP_TIME: ${BACKUP_TIME:-03:30}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./deploy/backup.sh:/backup.sh:ro
+      - ./backups:/backups
+    depends_on:
+      postgres: { condition: service_healthy }
     restart: unless-stopped
 
   web:

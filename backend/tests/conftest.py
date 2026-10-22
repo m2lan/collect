@@ -6,6 +6,7 @@ _tmp = tempfile.mkdtemp()
 os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL") or f"sqlite+aiosqlite:///{_tmp}/test.db"
 os.environ["REDIS_URL"] = ""
 os.environ["EMBEDDED_SCHEDULER"] = "false"
+os.environ.setdefault("BROWSER_POOL", "false")
 os.environ["SECRET_KEY"] = "test-secret-key-for-unit-tests-only-32b"
 if os.path.exists("/opt/pw-browsers/chromium"):
     os.environ.setdefault("BROWSER_EXECUTABLE_PATH", "/opt/pw-browsers/chromium")
@@ -13,6 +14,10 @@ if os.path.exists("/opt/pw-browsers/chromium"):
 import pytest  # noqa: E402
 
 from app.db import Base, engine  # noqa: E402
+from app.settings_store import DEFAULTS  # noqa: E402
+
+# 测试站都在本机，按域名限速只会拖慢测试（限速本身有单独的测试）
+DEFAULTS["crawler.domain_interval"] = 0
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select, update
 
-from app.api import ai, auth, lots, remote, runs, sources, system, templates
+from app.api import ai, auth, backups, dashboard, lots, remote, runs, sources, system, templates
 from app.api.deps import superuser
 from app.config import get_settings
 from app.db import SessionLocal
@@ -44,9 +44,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     if scheduler:
         scheduler.cancel()
+    from app.crawler.fetchers.pool import pool
     from app.remote import manager
 
     await manager.close_all()
+    await pool.close()
 
 
 app = FastAPI(title="拍卖价格采集平台", lifespan=lifespan)
@@ -65,6 +67,8 @@ api.include_router(ai.router, dependencies=protected)
 api.include_router(system.router, dependencies=protected)
 api.include_router(templates.router, dependencies=protected)
 api.include_router(remote.router, dependencies=protected)
+api.include_router(dashboard.router, dependencies=protected)
+api.include_router(backups.router, dependencies=protected)
 app.include_router(api)
 
 

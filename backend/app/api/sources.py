@@ -8,7 +8,7 @@ from app.crawler.cookies import parse_cookies
 from app.crawler.fetchers import FetchContext, LoginError
 from app.crawler.pipeline import jsonable
 from app.crawler.fetchers import open_fetcher
-from app.crawler.runner import crawl, network_options
+from app.crawler.runner import apply_network, crawl
 from app.crawler.snapshot import sanitize_snapshot
 from app.schemas.rule import FetchConfig
 from app.models import CrawlRun, Lot, Rule, Schedule, Source
@@ -265,10 +265,7 @@ async def build_context(session: SessionDep, body: PreviewIn | Any, source: Sour
         auth_type=body.auth_type, auth_config=merge_auth(body.auth_type, body.auth, stored),
         storage_state=storage_state,
     )
-    ctx.proxy, ctx.user_agent = await network_options(session, body.use_proxy)
-    if ctx.auth_config.get("user_agent"):
-        ctx.user_agent = ctx.auth_config["user_agent"]
-    return ctx
+    return await apply_network(session, ctx, body.use_proxy)
 
 
 @preview_router.post("/preview", response_model=PreviewOut)

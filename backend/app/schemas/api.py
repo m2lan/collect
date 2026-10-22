@@ -128,6 +128,8 @@ class RunOut(BaseModel):
     items_new: int
     items_updated: int
     error: str | None
+    error_type: str | None = None
+    duration_ms: int | None = None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -222,6 +224,8 @@ class AlertSettings(BaseModel):
 class CrawlerSettings(BaseModel):
     proxies: list[str] = Field(default_factory=list, description="代理地址列表，如 http://user:pass@host:port")
     random_ua: bool = True
+    stealth: bool = True
+    domain_interval: float = Field(1.0, ge=0, le=60)
 
 
 class TemplateIn(BaseModel):

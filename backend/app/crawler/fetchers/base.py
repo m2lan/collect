@@ -53,6 +53,9 @@ class FetchContext:
     # 代理地址，如 http://user:pass@1.2.3.4:8080 或 socks5://1.2.3.4:1080
     proxy: str | None = None
     user_agent: str = DEFAULT_UA
+    stealth: bool = True
+    # 按域名限速的最小间隔（秒），0 表示不限
+    domain_interval: float = 0.0
 
     @property
     def request_headers(self) -> dict[str, str]:

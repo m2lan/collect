@@ -16,6 +16,8 @@ DEFAULTS: dict[str, Any] = {
     "alert.webhook_url": "",
     "crawler.proxies": [],  # 代理池，站点开启"使用代理"后每次采集随机选一个
     "crawler.random_ua": True,  # 每次采集随机选择 User-Agent（站点自定义请求头优先）
+    "crawler.stealth": True,  # 浏览器指纹伪装
+    "crawler.domain_interval": 1.0,  # 同一主域名请求的最小间隔（秒，跨站点 / 任务共享），0 不限
 }
 
 

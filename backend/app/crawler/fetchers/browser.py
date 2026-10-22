@@ -8,6 +8,8 @@ from playwright.async_api import Browser, BrowserContext, Page, Playwright, Resp
 
 from app.config import get_settings
 from app.crawler.extractor import parse_json_body
+from app.crawler.fetchers.pool import pool
+from app.crawler.stealth import LAUNCH_ARGS, STEALTH_JS
 from app.crawler.fetchers.base import FetchContext, Fetched, LoginError
 from app.schemas.rule import FetchConfig
 
@@ -29,7 +31,7 @@ async def _launch(pw: Playwright, proxy: str | None = None) -> Browser:
     return await pw.chromium.launch(
         headless=settings.browser_headless,
         executable_path=settings.browser_executable_path or None,
-        args=["--disable-blink-features=AutomationControlled"],
+        args=LAUNCH_ARGS,
         proxy=_proxy_settings(proxy),  # type: ignore[arg-type]
     )
 
@@ -43,6 +45,8 @@ async def _new_context(browser: Browser, ctx: FetchContext, viewport: dict[str, 
         locale="zh-CN",
         ignore_https_errors=get_settings().browser_ignore_https_errors,
     )
+    if ctx.stealth:
+        await context.add_init_script(STEALTH_JS)
     if ctx.auth_type == "cookie":
         cookies = []
         for c in ctx.auth_config.get("cookies", []):
@@ -82,13 +86,11 @@ async def _do_login(page: Page, ctx: FetchContext, timeout_ms: int) -> dict[str,
 
 
 async def login_with_browser(ctx: FetchContext, fetch: FetchConfig) -> dict[str, Any]:
-    async with async_playwright() as pw:
-        browser = await _launch(pw, ctx.proxy)
-        try:
-            context = await _new_context(browser, ctx)
-            return await _do_login(await context.new_page(), ctx, fetch.timeout * 1000)
-        finally:
-            await browser.close()
+    """用浏览器完成表单登录（静态模式也借此拿到会话 Cookie）。旧会话可能已失效，总是重新登录。"""
+    ctx.storage_state = None
+    async with BrowserFetcher(ctx, fetch):  # 没有会话时进入即自动登录
+        assert ctx.storage_state is not None
+        return ctx.storage_state
 
 
 class BrowserFetcher:
@@ -99,13 +101,20 @@ class BrowserFetcher:
         self._json: list[dict[str, Any]] = []
         self._pw_cm = async_playwright()
         self.browser: Browser | None = None
+        self.context: BrowserContext | None = None
         self.page: Page | None = None
+        self._owns_browser = False
 
     async def __aenter__(self) -> "BrowserFetcher":
-        pw = await self._pw_cm.__aenter__()
-        self.browser = await _launch(pw, self.ctx.proxy)
-        context = await _new_context(self.browser, self.ctx)
-        self.page = await context.new_page()
+        if pool.enabled:
+            self.browser = await pool.acquire(self.ctx.proxy, _launch)
+            self._owns_browser = False
+        else:
+            pw = await self._pw_cm.__aenter__()
+            self.browser = await _launch(pw, self.ctx.proxy)
+            self._owns_browser = True
+        self.context = await _new_context(self.browser, self.ctx)
+        self.page = await self.context.new_page()
         if self.capture_json:
             self.page.on("response", self._on_response)
         if self.ctx.auth_type == "form" and not self.ctx.storage_state:
@@ -113,9 +122,15 @@ class BrowserFetcher:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self.browser:
-            await self.browser.close()
-        await self._pw_cm.__aexit__(None, None, None)
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+        if self._owns_browser:
+            if self.browser:
+                await self.browser.close()
+            await self._pw_cm.__aexit__(None, None, None)
 
     async def _on_response(self, resp: Response) -> None:
         if resp.request.resource_type not in ("xhr", "fetch", "script"):
@@ -224,17 +239,19 @@ class BrowserFetcher:
             await button.click(timeout=timeout)
         except Exception:
             return None
-        try:
-            await self.page.wait_for_load_state("networkidle", timeout=min(timeout, 15_000))
-        except Exception:
-            pass  # 长连接页面可能永远不会 networkidle
-        if cfg.wait_for:
+        if cfg.capture:
+            # 截获模式只需等目标接口返回；有长连接的网站永远不会 networkidle
+            await self._wait_capture(timeout)
+        else:
             try:
-                await self.page.wait_for_selector(cfg.wait_for, timeout=timeout)
+                await self.page.wait_for_load_state("networkidle", timeout=min(timeout, 10_000))
             except Exception:
                 pass
-        if cfg.capture:
-            await self._wait_capture(timeout)
+            if cfg.wait_for:
+                try:
+                    await self.page.wait_for_selector(cfg.wait_for, timeout=timeout)
+                except Exception:
+                    pass
         await self.page.wait_for_timeout(cfg.wait_ms or 800)
         return Fetched(url=self.page.url, status=200, html=await self.page.content(), json_responses=list(self._json))
 

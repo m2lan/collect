@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    Index,
     Boolean,
     Float,
     ForeignKey,
@@ -76,6 +77,7 @@ class Rule(Base):
 
 class CrawlRun(Base):
     __tablename__ = "crawl_run"
+    __table_args__ = (Index("ix_crawl_run_created_status", "created_at", "status"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("source.id", ondelete="CASCADE"), index=True)
@@ -88,6 +90,8 @@ class CrawlRun(Base):
     items_new: Mapped[int] = mapped_column(Integer, default=0)
     items_updated: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
+    error_type: Mapped[str | None] = mapped_column(String(16), index=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
     log: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, default=list)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

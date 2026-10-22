@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel
 
 from app.api.deps import SessionDep
-from app.crawler.runner import context_for, network_options
+from app.crawler.runner import apply_network, context_for
 from app.models import Source
 from app.models.entities import utcnow
 from app.remote import manager
@@ -41,10 +41,7 @@ async def start(body: StartIn, session: SessionDep) -> dict[str, Any]:
     source = await session.get(Source, body.source_id)
     if source is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "站点不存在")
-    ctx = context_for(source)
-    ctx.proxy, ctx.user_agent = await network_options(session, source.use_proxy)
-    if ctx.auth_config.get("user_agent"):
-        ctx.user_agent = ctx.auth_config["user_agent"]
+    ctx = await apply_network(session, context_for(source), source.use_proxy)
     # 在已有会话基础上继续（例如补充二次验证），表单登录的会话同样适用
     if ctx.storage_state and ctx.auth_type in ("none", "cookie"):
         ctx.auth_type = "session"
