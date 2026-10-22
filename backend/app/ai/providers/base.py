@@ -8,6 +8,29 @@ class LLMError(Exception):
     pass
 
 
+# 不支持强制指定工具（tool_choice 指定函数）的模型，如开启思考/推理模式的 DeepSeek、Kimi、Qwen、Claude 等。
+# 按 (base_url, model) 记住，后续请求直接使用 tool_choice=auto，避免每次先失败一次。
+_NO_FORCED_TOOL: set[tuple[str | None, str]] = set()
+
+
+def is_tool_choice_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "tool_choice" in msg or "tool choice" in msg
+
+
+def forced_tool_supported(config: "ProviderConfig") -> bool:
+    return (config.base_url, config.model) not in _NO_FORCED_TOOL
+
+
+def mark_forced_tool_unsupported(config: "ProviderConfig") -> None:
+    _NO_FORCED_TOOL.add((config.base_url, config.model))
+
+
+def must_call_tool(tool_name: str, schema: dict[str, Any]) -> str:
+    """不能强制调用工具时追加到系统提示，同时说明 JSON 格式以便退回解析文本。"""
+    return f"\n\n你必须调用工具 {tool_name} 提交结果；如果无法调用工具，" + json_instruction(schema).lstrip()
+
+
 @dataclass
 class Message:
     role: str  # user / assistant

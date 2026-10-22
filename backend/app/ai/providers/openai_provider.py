@@ -9,7 +9,11 @@ from app.ai.providers.base import (
     LLMResult,
     Message,
     ProviderConfig,
+    forced_tool_supported,
+    is_tool_choice_error,
     json_instruction,
+    mark_forced_tool_unsupported,
+    must_call_tool,
     parse_json_text,
 )
 
@@ -61,11 +65,21 @@ class OpenAIProvider:
     ) -> LLMResult:
         msgs = self._messages(system, messages)
         if self.config.supports_tools:
-            resp = await self._create(
-                messages=msgs,
-                tools=[{"type": "function", "function": {"name": tool_name, "description": tool_description, "parameters": schema}}],
-                tool_choice={"type": "function", "function": {"name": tool_name}},
-            )
+            tools = [{"type": "function", "function": {"name": tool_name, "description": tool_description, "parameters": schema}}]
+            resp = None
+            if forced_tool_supported(self.config):
+                try:
+                    resp = await self._create(
+                        messages=msgs, tools=tools, tool_choice={"type": "function", "function": {"name": tool_name}}
+                    )
+                except LLMError as exc:
+                    if not is_tool_choice_error(exc):
+                        raise
+                    mark_forced_tool_unsupported(self.config)
+            if resp is None:
+                # 思考模式等不支持强制指定工具：改为 auto，并在提示中要求调用工具
+                msgs[0]["content"] += must_call_tool(tool_name, schema)
+                resp = await self._create(messages=msgs, tools=tools, tool_choice="auto")
             choice = resp.choices[0].message
             for call in choice.tool_calls or []:
                 if call.function.name == tool_name:

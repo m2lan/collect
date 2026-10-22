@@ -174,3 +174,84 @@ async def test_provider_test_endpoint(client, monkeypatch):
     # 编辑时不传 key 则保留原值
     upd = await client.put(f"/api/ai/providers/{p['id']}", json={"name": "C2", "protocol": "openai", "model": "deepseek-chat", "base_url": "https://api.deepseek.com/v1"})
     assert upd.json()["api_key_masked"] == "sk-****7890"
+
+
+THINKING_ERROR = {"error": {"message": "Thinking mode does not support this tool_choice (request_id: x)",
+                            "type": "invalid_request_error", "param": None, "code": "invalid_request_error"}}
+
+
+async def test_openai_thinking_mode_falls_back_to_auto_tool_choice():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if body["tool_choice"] != "auto":
+            return httpx.Response(400, json=THINKING_ERROR)
+        assert "必须调用工具 report" in body["messages"][0]["content"]
+        return httpx.Response(200, json={
+            "id": "x", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "reasoning_content": "先想一想…",
+                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "report", "arguments": '{"ok": true}'}}],
+            }}],
+        })
+
+    cfg = ProviderConfig(protocol="openai", model="deepseek-reasoner", api_key="k", base_url="https://thinking.test/v1")
+    p = build_provider(cfg, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    r = await p.generate_structured("sys", [Message("user", "hi")], SCHEMA, "report", "d")
+    assert r.data == {"ok": True} and len(calls) == 2
+    # 同一模型的后续请求（新的 provider 实例）直接使用 auto，不再先失败一次
+    p2 = build_provider(cfg, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await p2.generate_structured("sys", [Message("user", "hi")], SCHEMA, "report", "d")
+    assert len(calls) == 3 and calls[2]["tool_choice"] == "auto"
+
+
+async def test_openai_thinking_mode_text_answer_is_parsed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["tool_choice"] != "auto":
+            return httpx.Response(400, json=THINKING_ERROR)
+        return httpx.Response(200, json={
+            "id": "x", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": '```json\n{"ok": true}\n```'}}],
+        })
+
+    cfg = ProviderConfig(protocol="openai", model="kimi-thinking", api_key="k", base_url="https://thinking2.test/v1")
+    p = build_provider(cfg, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert (await p.generate_structured("sys", [Message("user", "hi")], SCHEMA, "report", "d")).data == {"ok": True}
+
+
+async def test_anthropic_thinking_falls_back_to_auto_tool_choice():
+    calls = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if body["tool_choice"]["type"] == "tool":
+            return httpx2.Response(400, json={"type": "error", "error": {
+                "type": "invalid_request_error", "message": "Thinking may not be enabled when tool_choice forces tool use."}})
+        assert "必须调用工具 report" in body["system"]
+        return httpx2.Response(200, json={
+            "id": "msg", "type": "message", "role": "assistant", "model": "m", "stop_reason": "tool_use",
+            "content": [
+                {"type": "thinking", "thinking": "…", "signature": "s"},
+                {"type": "tool_use", "id": "t1", "name": "report", "input": {"ok": True}},
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        })
+
+    cfg = ProviderConfig(protocol="anthropic", model="claude-thinking", api_key="k", base_url="https://anthropic-thinking.test")
+    p = build_provider(cfg, httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    r = await p.generate_structured("sys", [Message("user", "hi")], SCHEMA, "report", "d")
+    assert r.data == {"ok": True} and [c["tool_choice"]["type"] for c in calls] == ["tool", "auto"]
+
+
+async def test_other_400_errors_are_not_swallowed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "Invalid API key", "type": "invalid_request_error"}})
+
+    cfg = ProviderConfig(protocol="openai", model="m", api_key="k", base_url="https://bad.test/v1")
+    p = build_provider(cfg, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(Exception, match="Invalid API key"):
+        await p.generate_structured("sys", [Message("user", "hi")], SCHEMA, "report", "d")

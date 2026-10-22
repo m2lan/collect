@@ -8,7 +8,11 @@ from app.ai.providers.base import (
     LLMResult,
     Message,
     ProviderConfig,
+    forced_tool_supported,
+    is_tool_choice_error,
     json_instruction,
+    mark_forced_tool_unsupported,
+    must_call_tool,
     parse_json_text,
 )
 
@@ -60,12 +64,23 @@ class AnthropicProvider:
     ) -> LLMResult:
         msgs = self._messages(messages)
         if self.config.supports_tools:
-            resp = await self._create(
-                system=system,
-                messages=msgs,
-                tools=[{"name": tool_name, "description": tool_description, "input_schema": schema}],
-                tool_choice={"type": "tool", "name": tool_name},
-            )
+            tools = [{"name": tool_name, "description": tool_description, "input_schema": schema}]
+            resp = None
+            if forced_tool_supported(self.config):
+                try:
+                    resp = await self._create(
+                        system=system, messages=msgs, tools=tools, tool_choice={"type": "tool", "name": tool_name}
+                    )
+                except LLMError as exc:
+                    if not is_tool_choice_error(exc):
+                        raise
+                    mark_forced_tool_unsupported(self.config)
+            if resp is None:
+                # 扩展思考等模式不支持强制指定工具：改为 auto，并在提示中要求调用工具
+                resp = await self._create(
+                    system=system + must_call_tool(tool_name, schema), messages=msgs, tools=tools,
+                    tool_choice={"type": "auto"},
+                )
             texts = []
             for block in resp.content:
                 if block.type == "tool_use" and block.name == tool_name:
