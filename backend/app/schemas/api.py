@@ -230,6 +230,7 @@ class CrawlerSettings(BaseModel):
     random_ua: bool = True
     stealth: bool = True
     domain_interval: float = Field(1.0, ge=0, le=60)
+    max_run_minutes: int = Field(60, ge=1, le=1440)
     boost_window_minutes: int = Field(30, ge=1, le=1440)
     boost_interval_minutes: float = Field(1, ge=0.5, le=60)
 

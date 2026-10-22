@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import json
 import re
@@ -131,6 +132,19 @@ class BrowserFetcher:
             if self.browser:
                 await self.browser.close()
             await self._pw_cm.__aexit__(None, None, None)
+
+    async def reset(self) -> None:
+        """页面卡死（加载超时后仍无响应）时换一个新标签页，会话与 Cookie 保留在 context 中。"""
+        assert self.context
+        old = self.page
+        self.page = await asyncio.wait_for(self.context.new_page(), 30)
+        if self.capture_json:
+            self.page.on("response", self._on_response)
+        if old is not None:
+            try:
+                await asyncio.wait_for(old.close(), 10)
+            except Exception:
+                pass
 
     async def _on_response(self, resp: Response) -> None:
         if resp.request.resource_type not in ("xhr", "fetch", "script"):

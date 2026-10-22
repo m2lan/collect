@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import CrawlRun, Lot, Rule, Schedule, Source
-from app.models.entities import utcnow
+from app.models.entities import ACTIVE_RUN_STATUSES, utcnow
 from app.settings_store import get_setting
 from app.tasks import enqueue_crawl
 
@@ -52,7 +52,7 @@ async def tick() -> int:
             if not await session.scalar(select(Rule.id).where(Rule.source_id == source.id, Rule.is_active)):
                 continue
             busy = await session.scalar(
-                select(CrawlRun.id).where(CrawlRun.source_id == source.id, CrawlRun.status.in_(["pending", "running"]))
+                select(CrawlRun.id).where(CrawlRun.source_id == source.id, CrawlRun.status.in_(ACTIVE_RUN_STATUSES))
             )
             if busy:
                 log.info("schedule %s skipped: source %s busy", sch.id, source.id)
@@ -86,7 +86,7 @@ async def boost_tick() -> int:
             if not ending or not await session.scalar(select(Rule.id).where(Rule.source_id == source.id, Rule.is_active)):
                 continue
             busy = await session.scalar(
-                select(CrawlRun.id).where(CrawlRun.source_id == source.id, CrawlRun.status.in_(["pending", "running"]))
+                select(CrawlRun.id).where(CrawlRun.source_id == source.id, CrawlRun.status.in_(ACTIVE_RUN_STATUSES))
             )
             last = await session.scalar(
                 select(func.max(CrawlRun.created_at)).where(CrawlRun.source_id == source.id, CrawlRun.kind == "ending")
@@ -110,10 +110,40 @@ async def ending_notice_tick() -> int:
         return await check_ending_soon(session)
 
 
+STALE_HEARTBEAT = timedelta(minutes=3)
+STALE_PENDING = timedelta(hours=2)
+
+
+async def sweep_stale_runs() -> int:
+    """把执行进程已经不在的任务标记为中断：执行中 / 停止中但 3 分钟没有心跳，或排队超过 2 小时仍未执行。"""
+    from sqlalchemy import update
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        dead = await session.execute(
+            update(CrawlRun)
+            .where(
+                CrawlRun.status.in_(["running", "cancelling"]),
+                func.coalesce(CrawlRun.heartbeat_at, CrawlRun.started_at, CrawlRun.created_at) < now - STALE_HEARTBEAT,
+            )
+            .values(status="failed", error="任务中断：执行进程已退出或重启（长时间没有心跳），请重新采集", error_type="other",
+                    finished_at=now)
+        )
+        stuck = await session.execute(
+            update(CrawlRun)
+            .where(CrawlRun.status == "pending", CrawlRun.created_at < now - STALE_PENDING)
+            .values(status="failed", error="任务排队超过 2 小时仍未执行，请检查 worker 服务是否运行", error_type="other",
+                    finished_at=now)
+        )
+        await session.commit()
+        return (dead.rowcount or 0) + (stuck.rowcount or 0)
+
+
 async def run_scheduler(interval: float = 15) -> None:
     log.info("scheduler started")
     while True:
-        for name, job in (("schedule", tick), ("boost", boost_tick), ("ending notice", ending_notice_tick)):
+        for name, job in (("schedule", tick), ("boost", boost_tick), ("ending notice", ending_notice_tick),
+                          ("stale runs", sweep_stale_runs)):
             try:
                 n = await job()
                 if n:

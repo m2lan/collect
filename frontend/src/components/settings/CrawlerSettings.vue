@@ -15,6 +15,10 @@
         <div>同一主域名的请求至少间隔 <el-input-number v-model="c.domain_interval" :min="0" :max="60" :step="0.5" :precision="1" style="margin: 0 8px; width: 120px" /> 秒</div>
         <div class="muted" style="width: 100%">跨站点、跨任务共享（例如多个淘宝搜索站点一起排队），0 表示不限</div>
       </el-form-item>
+      <el-form-item label="单次采集时长上限">
+        <div>超过 <el-input-number v-model="c.max_run_minutes" :min="1" :max="1440" style="margin: 0 8px; width: 120px" /> 分钟停止翻页，已抓到的数据照常保存</div>
+        <div class="muted" style="width: 100%">防止网站卡住时任务一直占用；单个页面另有加载时限，卡住会自动重试并跳过</div>
+      </el-form-item>
       <el-form-item label="代理池">
         <el-input v-model="proxies" type="textarea" :rows="4" class="mono" placeholder="每行一个，如：&#10;http://user:pass@1.2.3.4:8080&#10;socks5://5.6.7.8:1080" />
         <div class="muted">站点开启“使用代理”后，每次采集随机选择一个</div>

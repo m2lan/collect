@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crawler.extractor import entry_links, extract_captured, extract_detail, extract_page, page_urls
@@ -21,7 +21,7 @@ from app.crawler.throttle import domain_of, throttle
 from app.crawler.pipeline import UpsertStats, upsert_lots
 from app.db import SessionLocal
 from app.models import CrawlRun, Lot, Rule, Source
-from app.models.entities import utcnow
+from app.models.entities import ACTIVE_RUN_STATUSES, utcnow
 from app.schemas.rule import FetchConfig, RuleConfig
 from app.notify import notify
 from app.security import decrypt_json, encrypt_json
@@ -35,11 +35,18 @@ LIVE_LIMIT = 200
 
 
 class RunLog:
-    """采集过程日志，写入 crawl_run.log 供界面查看。"""
+    """采集过程日志，写入 crawl_run.log 供界面查看；同时承载停止信号（手动停止、超过时长上限）。"""
 
     def __init__(self, limit: int = 500):
         self.entries: list[dict[str, Any]] = []
         self.limit = limit
+        self.stop_reason: str | None = None
+
+    def stop(self, reason: str) -> None:
+        """请求在当前页面完成后停止，已抓到的数据照常保存。"""
+        if self.stop_reason is None:
+            self.stop_reason = reason
+            self.warn(f"{reason}，当前页面完成后停止")
 
     def add(self, msg: str, level: str = "info") -> None:
         log.log(logging.WARNING if level != "info" else logging.INFO, msg)
@@ -67,17 +74,29 @@ class CrawlResult:
 KnownKeys = Callable[[list[str]], Awaitable[set[str]]]
 
 
+def hard_timeout(fetcher: Fetcher) -> float:
+    """单个页面的总时限（秒）：加载、等待元素、截获接口、滚动等步骤各自有超时，这里兜底防止浏览器卡死。"""
+    cfg = getattr(fetcher, "fetch_config", None)
+    return (cfg.timeout if cfg else 30) * 3 + 30
+
+
 async def fetch_with_retry(
     fetcher: Fetcher, url: str, runlog: RunLog, method: str = "GET", body: dict[str, Any] | None = None,
     domain_interval: float = 0.0,
 ) -> Fetched:
     """失败自动重试（指数退避 1s、2s），登录失败不重试；每次请求前按域名限速。"""
+    limit = hard_timeout(fetcher)
     for attempt in range(1, RETRIES + 1):
         try:
             waited = await throttle(url, domain_interval)
             if waited >= 1:
                 runlog.info(f"按域名限速等待 {waited:.1f}s（{domain_of(url)}）")
-            return await fetcher.fetch(url, method, body)
+            try:
+                return await asyncio.wait_for(fetcher.fetch(url, method, body), limit)
+            except TimeoutError:
+                if hasattr(fetcher, "reset"):
+                    await fetcher.reset()  # type: ignore[attr-defined]
+                raise TimeoutError(f"页面 {limit:.0f}s 内没有加载完成（页面卡死或一直在跳转）") from None
         except LoginError:
             raise
         except Exception as exc:
@@ -164,12 +183,26 @@ async def crawl(
         starts = [fc.url or ctx.start_url]
 
     async with open_fetcher(ctx, fc, capture_json=bool(fc.capture)) as fetcher:
+        first_error: Exception | None = None
         for i, start in enumerate(starts):
+            if runlog.stop_reason:
+                break
             if config.entry:
                 runlog.info(f"专场 {i + 1}/{len(starts)}：{start}")
                 if interval:
                     await asyncio.sleep(interval)
-            await _crawl_list(fetcher, ctx, config, start, limit, interval, runlog, result, item_keys)
+            try:
+                await _crawl_list(fetcher, ctx, config, start, limit, interval, runlog, result, item_keys)
+            except LoginError:
+                raise
+            except Exception as exc:
+                if not config.entry:
+                    raise
+                # 某个专场失败不影响其他专场
+                first_error = first_error or exc
+                runlog.error(f"专场 {start} 抓取失败：{type(exc).__name__}: {str(exc)[:200]}")
+        if first_error and not result.items:
+            raise first_error
 
         if with_detail and config.detail.enabled and result.items:
             await _crawl_details(fetcher, config, result, runlog, interval, known_keys, ctx.domain_interval)
@@ -189,6 +222,8 @@ async def _crawl_list(
     clicked: Fetched | None = None  # 点击翻页得到的下一页内容
     click_started = 0.0
     while (queue or clicked) and pages < limit:
+        if runlog.stop_reason:
+            break
         started = click_started if clicked is not None else time.monotonic()
         if clicked is not None:
             fetched, url, body, clicked = clicked, clicked.url, None, None
@@ -201,7 +236,18 @@ async def _crawl_list(
             seen.add(key)
             if pages and interval:
                 await asyncio.sleep(interval)
-            fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body, ctx.domain_interval)
+            try:
+                fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body, ctx.domain_interval)
+            except LoginError:
+                raise
+            except Exception as exc:
+                if not pages:
+                    raise
+                # 翻页中途失败：停止翻页，前面抓到的数据照常保存
+                msg = f"第 {pages + 1} 页 {url} 抓取失败，停止翻页（已抓到的数据会保存）：{type(exc).__name__}: {str(exc)[:200]}"
+                runlog.error(msg)
+                result.errors.append(msg)
+                break
             source = url + (f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else "")
         if fc.capture:
             page = extract_captured(fetched.json_responses, fetched.url, config)
@@ -246,7 +292,15 @@ async def _crawl_list(
                 await asyncio.sleep(interval)
             await throttle(fetched.url, ctx.domain_interval)
             click_started = time.monotonic()
-            clicked = await fetcher.click_next(config.pagination.selector or "")  # type: ignore[attr-defined]
+            try:
+                clicked = await asyncio.wait_for(
+                    fetcher.click_next(config.pagination.selector or ""), hard_timeout(fetcher)  # type: ignore[attr-defined]
+                )
+            except TimeoutError:
+                msg = f"点击「{config.pagination.selector}」后页面 {hard_timeout(fetcher):.0f}s 内没有响应，停止翻页（已抓到的数据会保存）"
+                runlog.error(msg)
+                result.errors.append(msg)
+                break
             if clicked is None:
                 runlog.info(f"下一页按钮「{config.pagination.selector}」不存在或已禁用（已是最后一页），停止翻页")
     if pages >= limit and (queue or clicked):
@@ -270,6 +324,8 @@ async def _crawl_details(
     runlog.info(f"开始抓取 {len(candidates)} 个详情页")
     failed = 0
     for it in candidates:
+        if runlog.stop_reason:
+            break
         if interval:
             await asyncio.sleep(interval)
         url = str(it[detail.url_field])
@@ -380,110 +436,170 @@ async def _live_refresh(
     return len(items), len(items), stats
 
 
+MANUAL_STOP = "已手动停止"
+HEARTBEAT_SECONDS = 5
+
+
+async def _heartbeat(run_id: int, runlog: RunLog, max_minutes: float) -> None:
+    """执行期间定期写入实时日志与心跳，并响应"停止"请求和时长上限。"""
+    started = time.monotonic()
+    while True:
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+        if max_minutes and time.monotonic() - started > max_minutes * 60:
+            runlog.stop(f"已达到单次采集时长上限 {max_minutes:g} 分钟")
+        try:
+            async with SessionLocal() as s:
+                status = await s.scalar(select(CrawlRun.status).where(CrawlRun.id == run_id))
+                if status == "cancelling":
+                    runlog.stop(MANUAL_STOP)
+                await s.execute(
+                    update(CrawlRun).where(CrawlRun.id == run_id).values(log=list(runlog.entries), heartbeat_at=utcnow())
+                )
+                await s.commit()
+        except Exception:
+            log.warning("heartbeat for run %s failed", run_id, exc_info=True)
+
+
+async def _mark_interrupted(run_id: int, runlog: RunLog, reason: str) -> None:
+    runlog.error(reason)
+    async with SessionLocal() as s:
+        await s.execute(
+            update(CrawlRun).where(CrawlRun.id == run_id, CrawlRun.status.in_(ACTIVE_RUN_STATUSES))
+            .values(status="failed", error=reason, error_type=classify_error(reason), finished_at=utcnow(), log=runlog.entries)
+        )
+        await s.commit()
+
+
 async def run_crawl(run_id: int) -> None:
     runlog = RunLog()
+    heartbeat: asyncio.Task | None = None
+    try:
+        async with SessionLocal() as session:
+            run = await session.get(CrawlRun, run_id)
+            if run is None or run.status != "pending":
+                return  # 已被取消或已由其他进程执行
+            max_minutes = float(await get_setting(session, "crawler.max_run_minutes") or 0)
+            run.status, run.started_at, run.heartbeat_at = "running", utcnow(), utcnow()
+            await session.commit()
+            heartbeat = asyncio.create_task(_heartbeat(run_id, runlog, max_minutes))
+            await _execute_run(session, run, runlog, max_minutes)
+    except asyncio.CancelledError:
+        # arq 任务超时或 worker 关闭：标记为中断，避免一直显示"采集中"
+        await asyncio.shield(_mark_interrupted(run_id, runlog, "任务被中断（超过任务时限或 worker 停止）"))
+        raise
+    except Exception as exc:
+        # 收尾阶段（写库、通知等）出错时也不能让任务停留在执行中
+        log.exception("crawl run %s crashed", run_id)
+        await _mark_interrupted(run_id, runlog, f"任务异常结束：{type(exc).__name__}: {str(exc)[:300]}")
+    finally:
+        if heartbeat:
+            heartbeat.cancel()
+
+
+async def _execute_run(session: AsyncSession, run: CrawlRun, runlog: RunLog, max_minutes: float) -> None:
+    run_id = run.id
     items: list[dict[str, Any]] | None = None
     stats: UpsertStats | None = None
-    async with SessionLocal() as session:
-        run = await session.get(CrawlRun, run_id)
-        if run is None:
-            return
-        source = await session.get(Source, run.source_id)
-        rule = await session.scalar(select(Rule).where(Rule.source_id == run.source_id, Rule.is_active))
-        run.status, run.started_at = "running", utcnow()
+    source = await session.get(Source, run.source_id)
+    rule = await session.scalar(select(Rule).where(Rule.source_id == run.source_id, Rule.is_active))
+    try:
+        if source is None or rule is None:
+            raise RuntimeError("站点不存在或没有启用的规则")
+        run.rule_version = rule.version
+        # 立即提交：采集期间不能持有 crawl_run 行的写锁，否则心跳与"停止"请求会一直等待
         await session.commit()
+        config = RuleConfig.model_validate(rule.config)
+        ctx = await apply_network(session, context_for(source), source.use_proxy)
+        mode = config.fetch.mode or source.fetch_mode
+        runlog.info(
+            f"开始{'盯价' if run.kind == 'live' else '采集'}：{source.name}，规则 v{rule.version}，抓取方式 {mode}"
+            + (f"，代理 {ctx.proxy.split('@')[-1]}" if ctx.proxy else "")
+        )
 
-        try:
-            if source is None or rule is None:
-                raise RuntimeError("站点不存在或没有启用的规则")
-            run.rule_version = rule.version
-            config = RuleConfig.model_validate(rule.config)
-            ctx = await apply_network(session, context_for(source), source.use_proxy)
-            mode = config.fetch.mode or source.fetch_mode
-            runlog.info(
-                f"开始{'盯价' if run.kind == 'live' else '采集'}：{source.name}，规则 v{rule.version}，抓取方式 {mode}"
-                + (f"，代理 {ctx.proxy.split('@')[-1]}" if ctx.proxy else "")
-            )
+        async def save_state(state: dict[str, Any]) -> None:
+            runlog.info("自动登录成功，已保存登录会话")
+            source.storage_state = encrypt_json(state)
+            await session.commit()
 
-            async def save_state(state: dict[str, Any]) -> None:
-                runlog.info("自动登录成功，已保存登录会话")
-                source.storage_state = encrypt_json(state)
-                await session.commit()
+        ctx.on_storage_state = save_state
 
-            ctx.on_storage_state = save_state
+        if run.kind in ("live", "ending"):
+            window = int(await get_setting(session, "live.boost_window_minutes") or 30) if run.kind == "ending" else None
+            run.pages, run.items_found, stats = await _live_refresh(session, source, config, ctx, run, runlog, window)
+            run.items_updated = stats.updated
+            run.status = "success"
+            runlog.info(f"盯价完成：刷新 {run.items_found} 个拍品，价格/状态变化 {run.items_updated} 个")
+        else:
+            async def known(keys: list[str]) -> set[str]:
+                rows = await session.scalars(
+                    select(Lot.unique_key).where(Lot.source_id == source.id, Lot.unique_key.in_(keys))
+                )
+                return set(rows.all())
 
-            if run.kind in ("live", "ending"):
-                window = int(await get_setting(session, "live.boost_window_minutes") or 30) if run.kind == "ending" else None
-                run.pages, run.items_found, stats = await _live_refresh(session, source, config, ctx, run, runlog, window)
-                run.items_updated = stats.updated
-                run.status = "success"
-                runlog.info(f"盯价完成：刷新 {run.items_found} 个拍品，价格/状态变化 {run.items_updated} 个")
-            else:
-                async def known(keys: list[str]) -> set[str]:
-                    rows = await session.scalars(
-                        select(Lot.unique_key).where(Lot.source_id == source.id, Lot.unique_key.in_(keys))
-                    )
-                    return set(rows.all())
-
+            # 正常情况下由心跳在时长上限处优雅停止；这里再留 5 分钟兜底，防止卡在单个操作上
+            async with asyncio.timeout(max_minutes * 60 + 300 if max_minutes else None):
                 result = await crawl(ctx, config, source.rate_limit, runlog=runlog, known_keys=known)
-                items = result.items
-                stats = await upsert_lots(session, source.id, run.id, result.items, config.list.unique_key)
-                run.pages = result.pages
-                run.items_found = len(result.items)
-                run.items_new, run.items_updated = stats.new, stats.updated
-                await session.commit()
-                runlog.info(f"入库完成：抓取 {len(result.items)} 条，新增 {stats.new} 条，价格/状态变化 {stats.updated} 条")
-                run.status = "success" if result.items else "failed"
-                if not result.items:
-                    run.error = "未抽取到任何拍品，请检查规则或登录状态"
-                    runlog.error(run.error)
-                elif result.errors:
-                    run.error = "\n".join(result.errors[:20])
-        except LoginError as exc:
-            await session.rollback()
-            run = await session.get(CrawlRun, run_id)
-            assert run
-            run.status, run.error = "failed", str(exc)[:4000]
-            runlog.error(run.error)
-            src = await session.get(Source, run.source_id)
-            if src is not None and src.login_expired_at is None:
-                src.login_expired_at = utcnow()
-                await notify(session, f"登录失效：{src.name}", f"{exc}\n站点：{src.start_url}")
-        except Exception as exc:
-            log.exception("crawl run %s failed", run_id)
-            await session.rollback()
-            run = await session.get(CrawlRun, run_id)
-            assert run
-            run.status, run.error = "failed", f"{type(exc).__name__}: {exc}"[:4000]
-            runlog.error(run.error)
-        run.finished_at = utcnow()
-        if run.started_at:
-            run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
-        run.error_type = classify_error(run.error) if run.status == "failed" else None
-        if run.status == "success":
-            src = await session.get(Source, run.source_id)
-            if src is not None and src.login_expired_at is not None:
-                src.login_expired_at = None
-                runlog.info("登录状态已恢复正常")
-                await notify(session, f"登录已恢复：{src.name}", "采集恢复正常")
-        needs_repair = False
-        source = await session.get(Source, run.source_id)
-        # 盯价任务只刷新已有拍品，不参与规则健康判定
-        if source is not None and run.kind == "full":
-            needs_repair = await update_health(session, source, run, items)
-            if source.health != "ok":
-                runlog.warn(f"规则健康状态：{source.health}，{source.health_message}")
-        run.log = runlog.entries
-        await session.commit()
-        if stats is not None:
-            try:
-                # 先标注新拍品，订阅中按标签筛选才能命中
-                await auto_tag_new(stats.new_ids)
-            except Exception:
-                log.exception("auto tag failed for run %s", run_id)
-            try:
-                await notify_after_crawl(session, stats.new_ids, stats.price_changes)
-            except Exception:
-                log.exception("subscription notify failed for run %s", run_id)
-        if needs_repair and source is not None:
-            await maybe_auto_repair(source.id)
+            items = result.items
+            stats = await upsert_lots(session, source.id, run.id, result.items, config.list.unique_key)
+            run.pages = result.pages
+            run.items_found = len(result.items)
+            run.items_new, run.items_updated = stats.new, stats.updated
+            await session.commit()
+            runlog.info(f"入库完成：抓取 {len(result.items)} 条，新增 {stats.new} 条，价格/状态变化 {stats.updated} 条")
+            run.status = "success" if result.items else "failed"
+            if runlog.stop_reason == MANUAL_STOP:
+                run.status, run.error = "cancelled", f"{MANUAL_STOP}，已保存 {len(result.items)} 条"
+            elif not result.items:
+                run.error = runlog.stop_reason or "未抽取到任何拍品，请检查规则或登录状态"
+                runlog.error(run.error)
+            elif result.errors or runlog.stop_reason:
+                run.error = "\n".join(([runlog.stop_reason] if runlog.stop_reason else []) + result.errors[:20])
+    except LoginError as exc:
+        await session.rollback()
+        run = await session.get(CrawlRun, run_id)
+        assert run
+        run.status, run.error = "failed", str(exc)[:4000]
+        runlog.error(run.error)
+        src = await session.get(Source, run.source_id)
+        if src is not None and src.login_expired_at is None:
+            src.login_expired_at = utcnow()
+            await notify(session, f"登录失效：{src.name}", f"{exc}\n站点：{src.start_url}")
+    except Exception as exc:
+        log.exception("crawl run %s failed", run_id)
+        await session.rollback()
+        run = await session.get(CrawlRun, run_id)
+        assert run
+        detail = str(exc) or ("采集超过时长上限后仍未结束，已强制终止" if isinstance(exc, TimeoutError) else "")
+        run.status, run.error = "failed", f"{type(exc).__name__}: {detail}"[:4000]
+        runlog.error(run.error)
+    run.finished_at = utcnow()
+    if run.started_at:
+        run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
+    run.error_type = classify_error(run.error) if run.status == "failed" else None
+    if run.status == "success":
+        src = await session.get(Source, run.source_id)
+        if src is not None and src.login_expired_at is not None:
+            src.login_expired_at = None
+            runlog.info("登录状态已恢复正常")
+            await notify(session, f"登录已恢复：{src.name}", "采集恢复正常")
+    needs_repair = False
+    source = await session.get(Source, run.source_id)
+    # 盯价任务只刷新已有拍品，不参与规则健康判定
+    if source is not None and run.kind == "full" and run.status != "cancelled":
+        needs_repair = await update_health(session, source, run, items)
+        if source.health != "ok":
+            runlog.warn(f"规则健康状态：{source.health}，{source.health_message}")
+    run.log = runlog.entries
+    await session.commit()
+    if stats is not None:
+        try:
+            # 先标注新拍品，订阅中按标签筛选才能命中
+            await auto_tag_new(stats.new_ids)
+        except Exception:
+            log.exception("auto tag failed for run %s", run_id)
+        try:
+            await notify_after_crawl(session, stats.new_ids, stats.price_changes)
+        except Exception:
+            log.exception("subscription notify failed for run %s", run_id)
+    if needs_repair and source is not None:
+        await maybe_auto_repair(source.id)

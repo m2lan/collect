@@ -42,10 +42,10 @@ def login_server():
 async def wait_run(client: httpx.AsyncClient, run_id: int) -> dict:
     for _ in range(300):
         run = (await client.get(f"/api/runs/{run_id}")).json()
-        if run["status"] not in ("pending", "running"):
+        if run["status"] not in ("pending", "running", "cancelling"):
             return run
         await asyncio.sleep(0.1)
-    raise AssertionError("run did not finish")
+    raise AssertionError(f"run did not finish: {run['status']} {[e['msg'][:50] for e in run.get('log') or []]}")
 
 
 async def test_requires_auth(db):

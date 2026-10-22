@@ -32,6 +32,7 @@ export const aiUsage = () => http.get('/ai/usage')
 
 export const snapshot = (body) => http.post('/snapshot', body)
 export const getRun = (id) => http.get(`/runs/${id}`)
+export const cancelRun = (id) => http.post(`/runs/${id}/cancel`)
 export const listSchedules = (id) => http.get(`/sources/${id}/schedules`)
 export const saveSchedules = (id, body) => http.put(`/sources/${id}/schedules`, body)
 

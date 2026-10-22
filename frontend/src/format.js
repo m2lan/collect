@@ -8,6 +8,8 @@ export const STATUS = {
 export const RUN_STATUS = {
   pending: { label: '排队中', type: 'info' },
   running: { label: '采集中', type: 'primary' },
+  cancelling: { label: '停止中', type: 'warning' },
+  cancelled: { label: '已停止', type: 'info' },
   success: { label: '成功', type: 'success' },
   failed: { label: '失败', type: 'danger' },
 }

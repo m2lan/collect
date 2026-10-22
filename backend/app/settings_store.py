@@ -19,6 +19,7 @@ DEFAULTS: dict[str, Any] = {
     "crawler.random_ua": True,  # 每次采集随机选择 User-Agent（站点自定义请求头优先）
     "crawler.stealth": True,  # 浏览器指纹伪装
     "crawler.domain_interval": 1.0,
+    "crawler.max_run_minutes": 60,  # 单次采集时长上限，超过后停止翻页并保存已抓到的数据
     "search.synonyms": "翡翠,玉翠,缅甸玉\n和田玉,和田籽料\n青花,青花瓷\n劳力士,rolex\n茅台,飞天茅台",  # 每行一组同义词
     "live.boost_window_minutes": 30,  # 临近结束加密盯价：结束前多少分钟内
     "live.boost_interval_minutes": 1,  # 加密期间的刷新间隔（分钟）  # 同一主域名请求的最小间隔（秒，跨站点 / 任务共享），0 不限

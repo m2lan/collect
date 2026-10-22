@@ -32,8 +32,15 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="" width="70">
-        <template #default="{ row }"><el-button link type="primary" @click="openLog(row)">日志</el-button></template>
+      <el-table-column label="" width="110">
+        <template #default="{ row }">
+          <el-button link type="primary" @click="openLog(row)">日志</el-button>
+          <el-popconfirm v-if="can('operator') && ACTIVE.includes(row.status) && row.status !== 'cancelling'"
+            :title="row.status === 'pending' ? '取消该采集任务？' : '停止采集？当前页面完成后停止，已抓到的数据会保存'" width="260"
+            @confirm="stop(row)">
+            <template #reference><el-button link type="danger">停止</el-button></template>
+          </el-popconfirm>
+        </template>
       </el-table-column>
     </el-table>
     <el-pagination
@@ -47,7 +54,8 @@
       <div v-for="(e, i) in logRun.log" :key="i" :class="['line', e.level]">
         <span class="t">{{ fmtTime(e.t) }}</span>{{ e.msg }}
       </div>
-      <div v-if="!logRun.log?.length" class="muted">暂无日志</div>
+      <div v-if="!logRun.log?.length" class="muted">{{ ACTIVE.includes(logRun.status) ? '等待日志…' : '暂无日志' }}</div>
+      <div v-if="ACTIVE.includes(logRun.status)" class="muted live"><el-icon class="is-loading"><Loading /></el-icon>{{ RUN_STATUS[logRun.status]?.label }}，日志实时更新</div>
     </div>
   </el-drawer>
   </div>
@@ -56,10 +64,14 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { getRun, listRuns, listSources } from '../api'
+import { cancelRun, getRun, listRuns, listSources } from '../api'
+import { ElMessage } from 'element-plus'
+import { Loading } from '@element-plus/icons-vue'
 import { ERROR_TYPE, RUN_STATUS, fmtDuration, fmtTime } from '../format'
+import { can } from '../store'
 import PageHeader from '../components/PageHeader.vue'
 
+const ACTIVE = ['pending', 'running', 'cancelling']
 const TRIGGER = { manual: '手动', cron: '定时', boost: '加密盯价' }
 const KIND = { live: '·盯价', ending: '·临近结束' }
 
@@ -77,6 +89,12 @@ let timer
 async function openLog(row) {
   logRun.value = await getRun(row.id)
   logVisible.value = true
+}
+
+async function stop(row) {
+  await cancelRun(row.id)
+  ElMessage.success(row.status === 'pending' ? '已取消' : '已请求停止，当前页面完成后停止')
+  load()
 }
 
 const sourceName = (id) => sources.value.find((s) => s.id === id)?.name || `#${id}`
@@ -102,8 +120,10 @@ onMounted(async () => {
   load()
   sources.value = await listSources()
   // 有执行中的任务时自动刷新
-  timer = setInterval(() => {
-    if (rows.value.some((r) => r.status === 'pending' || r.status === 'running')) load()
+  timer = setInterval(async () => {
+    if (rows.value.some((r) => ACTIVE.includes(r.status))) load()
+    // 日志抽屉打开且任务未结束时实时刷新日志
+    if (logVisible.value && logRun.value && ACTIVE.includes(logRun.value.status)) logRun.value = await getRun(logRun.value.id)
   }, 3000)
 })
 onUnmounted(() => clearInterval(timer))
@@ -114,6 +134,7 @@ onUnmounted(() => clearInterval(timer))
 .line .t { color: #909399; margin-right: 8px; }
 .line.warn { color: #e6a23c; }
 .line.error { color: #f56c6c; }
+.live { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 .error { color: #f56c6c; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 </style>
 <style>

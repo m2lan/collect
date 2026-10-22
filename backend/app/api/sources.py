@@ -12,6 +12,7 @@ from app.crawler.runner import RunLog, apply_network, crawl
 from app.crawler.snapshot import sanitize_snapshot
 from app.schemas.rule import FetchConfig
 from app.models import CrawlRun, Lot, Rule, Schedule, Source
+from app.models.entities import ACTIVE_RUN_STATUSES
 from app.schemas.api import (
     AuthIn,
     AuthOut,
@@ -179,7 +180,7 @@ async def trigger_crawl(source_id: int, session: SessionDep, kind: Literal["full
     if not await session.scalar(select(Rule.id).where(Rule.source_id == source_id, Rule.is_active)):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "该站点还没有启用的采集规则")
     running = await session.scalar(
-        select(CrawlRun.id).where(CrawlRun.source_id == source_id, CrawlRun.status.in_(["pending", "running"]))
+        select(CrawlRun.id).where(CrawlRun.source_id == source_id, CrawlRun.status.in_(ACTIVE_RUN_STATUSES))
     )
     if running:
         raise HTTPException(status.HTTP_409_CONFLICT, "该站点已有采集任务在执行")

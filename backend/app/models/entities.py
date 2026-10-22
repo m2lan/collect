@@ -82,6 +82,10 @@ class Rule(Base):
     source: Mapped[Source] = relationship(back_populates="rules")
 
 
+# 未结束的采集任务状态：cancelling 表示已请求停止、等待执行进程收尾
+ACTIVE_RUN_STATUSES = ("pending", "running", "cancelling")
+
+
 class CrawlRun(Base):
     __tablename__ = "crawl_run"
     __table_args__ = (Index("ix_crawl_run_created_status", "created_at", "status"),)
@@ -103,6 +107,8 @@ class CrawlRun(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    # 执行中定期更新；长时间没有更新说明执行进程已退出，由调度器标记为中断
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
 
 class Lot(Base):

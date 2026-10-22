@@ -13,7 +13,7 @@ from app.audit import AuditMiddleware
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import CrawlRun, User
-from app.models.entities import utcnow
+from app.models.entities import ACTIVE_RUN_STATUSES, utcnow
 from app.scheduler import run_scheduler
 from app.security import hash_password
 
@@ -30,7 +30,7 @@ async def init_admin() -> None:
             # 进程内执行模式下，重启会中断任务，标记为失败以免一直占用"执行中"状态
             await session.execute(
                 update(CrawlRun)
-                .where(CrawlRun.status.in_(["pending", "running"]))
+                .where(CrawlRun.status.in_(ACTIVE_RUN_STATUSES))
                 .values(status="failed", error="服务重启，任务中断", finished_at=utcnow())
             )
         await session.commit()
