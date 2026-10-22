@@ -117,3 +117,25 @@ async def test_cancel_pending_and_sweep_stale(client, server):
     assert rows[ids[0]].status == "cancelled" and rows[ids[0]].pages == 0
     assert rows[ids[1]].status == "failed" and "任务中断" in rows[ids[1]].error
     assert rows[ids[2]].status == "running"
+
+
+async def test_detail_pages_do_not_wait_for_list_selector(server):
+    import time
+
+    import pytest
+
+    from app.crawler.fetchers.base import FetchContext
+    from app.schemas.rule import RuleConfig
+    from tests.test_api import HAS_BROWSER
+
+    if not HAS_BROWSER:
+        pytest.skip("未配置浏览器")
+    rule = {**RULE, "fetch": {"mode": "browser", "wait_for": ".lot-item", "timeout": 8},
+            "detail": {"enabled": True, "fields": [{"key": "estimate", "selector": ".estimate", "transform": ["trim"]}]}}
+    log = RunLog()
+    started = time.monotonic()
+    res = await crawl(FetchContext(start_url=f"{server}/list", fetch_mode="browser"), RuleConfig.model_validate(rule),
+                      rate_limit=0, runlog=log)
+    # 3 个详情页上都没有 .lot-item；以前每页要等满 8 秒
+    assert res.details == 3 and all(it.get("estimate") for it in res.items)
+    assert time.monotonic() - started < 15, [e["msg"] for e in log.entries]

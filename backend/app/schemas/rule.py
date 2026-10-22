@@ -121,6 +121,7 @@ class DetailRule(BaseModel):
     fields: list[FieldRule] = Field(default_factory=list, description="选择器相对整个详情页")
     max_items: int = Field(50, ge=1, le=1000, description="每次采集最多抓取的详情页数量")
     only_new: bool = Field(True, description="只抓取首次出现的拍品的详情页")
+    wait_for: str | None = Field(None, description="浏览器模式下详情页等待出现的 CSS 选择器（列表页的 wait_for 不用于详情页）")
 
 
 class EntryRule(BaseModel):

@@ -307,7 +307,30 @@ async def _crawl_list(
         runlog.info(f"已达到最大页数 {limit}，停止翻页")
 
 
+def detail_fetch_config(config: RuleConfig) -> FetchConfig:
+    """详情页的抓取参数：不沿用列表页的 wait_for / 滚动 / 接口截获（详情页上没有这些，会白白等到超时）。"""
+    fc = config.fetch
+    return FetchConfig(
+        mode=None if fc.mode == "api" else fc.mode, wait_for=config.detail.wait_for,
+        wait_ms=min(fc.wait_ms, 3000), timeout=fc.timeout,
+    )
+
+
 async def _crawl_details(
+    fetcher: Fetcher, config: RuleConfig, result: CrawlResult, runlog: RunLog, interval: float,
+    known_keys: KnownKeys | None, domain_interval: float = 0.0,
+) -> None:
+    list_cfg = getattr(fetcher, "fetch_config", None)
+    if list_cfg is not None:
+        fetcher.fetch_config = detail_fetch_config(config)  # type: ignore[attr-defined]
+    try:
+        await _fetch_details(fetcher, config, result, runlog, interval, known_keys, domain_interval)
+    finally:
+        if list_cfg is not None:
+            fetcher.fetch_config = list_cfg  # type: ignore[attr-defined]
+
+
+async def _fetch_details(
     fetcher: Fetcher, config: RuleConfig, result: CrawlResult, runlog: RunLog, interval: float,
     known_keys: KnownKeys | None, domain_interval: float = 0.0,
 ) -> None:
@@ -323,7 +346,11 @@ async def _crawl_details(
         return
     runlog.info(f"开始抓取 {len(candidates)} 个详情页")
     failed = 0
-    for it in candidates:
+    started = time.monotonic()
+    for n, it in enumerate(candidates, 1):
+        if n > 1 and n % 10 == 1:
+            spent = time.monotonic() - started
+            runlog.info(f"详情页进度 {n - 1}/{len(candidates)}，平均 {spent / (n - 1):.1f}s/页")
         if runlog.stop_reason:
             break
         if interval:
@@ -341,7 +368,7 @@ async def _crawl_details(
         result.errors.extend(errors)
         it.update({k: v for k, v in values.items() if v is not None})
         result.details += 1
-    runlog.info(f"详情页完成：成功 {result.details}，失败 {failed}")
+    runlog.info(f"详情页完成：成功 {result.details}，失败 {failed}，耗时 {time.monotonic() - started:.0f}s")
 
 
 async def network_options(session: AsyncSession, use_proxy: bool) -> tuple[str | None, str]:
@@ -414,8 +441,7 @@ async def _live_refresh(
     key_field = config.list.unique_key or "url"
     items: list[dict[str, Any]] = []
     interval = 1 / source.rate_limit if source.rate_limit > 0 else 0
-    fetch_cfg = config.fetch.model_copy(update={"mode": None if config.fetch.mode == "api" else config.fetch.mode})
-    async with open_fetcher(ctx, fetch_cfg) as fetcher:
+    async with open_fetcher(ctx, detail_fetch_config(config)) as fetcher:
         for i, lot in enumerate(lots):
             field_name = config.detail.url_field
             url = lot.url if field_name == "url" else (lot.extra or {}).get(field_name)
