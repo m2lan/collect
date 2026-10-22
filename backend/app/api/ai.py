@@ -42,7 +42,8 @@ def _provider_out(row: LLMProvider) -> ProviderOut:
 async def get_ai_settings(session: SessionDep) -> dict:
     s = await get_settings_dict(session, "ai.")
     settings = AISettings(**{k.removeprefix("ai."): v for k, v in s.items()})
-    return {**settings.model_dump(), "available": await service.ai_available(session)}
+    available, reason = await service.ai_status(session)
+    return {**settings.model_dump(), "available": available, "reason": reason, "used_today": await service.used_today(session)}
 
 
 @router.put("/settings")

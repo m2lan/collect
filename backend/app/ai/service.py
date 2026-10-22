@@ -40,26 +40,32 @@ async def resolve_provider(session: AsyncSession, provider_id: int | None = None
     return row, provider_factory(provider_config(row))
 
 
+async def used_today(session: AsyncSession) -> int:
+    today = datetime.combine(datetime.now(UTC).date(), time.min, tzinfo=UTC)
+    used = await session.scalar(select(func.count()).select_from(AIGeneration).where(AIGeneration.created_at >= today))
+    return used or 0
+
+
 async def ensure_ai_available(session: AsyncSession) -> None:
     if not await get_setting(session, "ai.enabled"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "AI 功能未开启")
     limit = int(await get_setting(session, "ai.daily_limit") or 0)
-    if limit:
-        today = datetime.combine(datetime.now(UTC).date(), time.min, tzinfo=UTC)
-        used = await session.scalar(
-            select(func.count()).select_from(AIGeneration).where(AIGeneration.created_at >= today)
-        )
-        if (used or 0) >= limit:
-            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"今日 AI 调用次数已达上限（{limit}）")
+    if limit and await used_today(session) >= limit:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"今日 AI 调用次数已达上限（{limit}）")
+
+
+async def ai_status(session: AsyncSession) -> tuple[bool, str]:
+    """返回 (是否可用, 原因说明)，供界面展示。"""
+    try:
+        await ensure_ai_available(session)
+        row, _ = await resolve_provider(session)
+    except HTTPException as exc:
+        return False, str(exc.detail)
+    return True, f"AI 可用，默认模型：{row.name}（{row.model}）"
 
 
 async def ai_available(session: AsyncSession) -> bool:
-    try:
-        await ensure_ai_available(session)
-        await resolve_provider(session)
-    except HTTPException:
-        return False
-    return True
+    return (await ai_status(session))[0]
 
 
 async def run_generation(

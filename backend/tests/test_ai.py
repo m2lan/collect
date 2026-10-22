@@ -117,7 +117,11 @@ async def _enable_ai(client):
 async def test_ai_disabled(client, server):
     r = await client.post("/api/ai/generate", json={"start_url": f"{server}/list", "fetch_mode": "static"})
     assert r.status_code == 403
-    assert (await client.get("/api/ai/settings")).json()["available"] is False
+    st = (await client.get("/api/ai/settings")).json()
+    assert st["available"] is False and st["reason"] == "AI 功能未开启"
+    await client.put("/api/ai/settings", json={"enabled": True, "daily_limit": 5, "auto_repair": False, "max_rounds": 3})
+    st = (await client.get("/api/ai/settings")).json()
+    assert st["available"] is False and "没有可用的 AI 模型" in st["reason"] and st["used_today"] == 0
 
 
 async def test_ai_generate_self_repair_and_apply(client, server, fake):

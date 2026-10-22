@@ -19,9 +19,9 @@
       </el-form-item>
       <el-form-item>
         <el-button type="primary" @click="saveSettings">保存</el-button>
-        <el-tag disable-transitions v-if="ai.enabled" :type="ai.available ? 'success' : 'warning'" style="margin-left: 12px">
-          {{ ai.available ? 'AI 可用' : '未配置可用模型或已达今日上限' }}
-        </el-tag>
+        <el-tag v-if="aiDirty" disable-transitions type="warning" style="margin-left: 12px">设置已修改，点击"保存"后生效</el-tag>
+        <el-tag v-else disable-transitions :type="ai.available ? 'success' : 'warning'" style="margin-left: 12px">{{ ai.reason }}</el-tag>
+        <span v-if="ai.daily_limit" class="muted" style="margin-left: 12px">今日已调用 {{ ai.used_today }} / {{ ai.daily_limit }} 次</span>
       </el-form-item>
     </el-form>
   </el-card>
@@ -188,7 +188,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   aiUsage, createProvider, deleteProvider, deleteTemplate, getAISettings, getAlertSettings, getCrawlerSettings,
@@ -208,7 +208,15 @@ const BASE_URLS = {
   ],
 }
 
-const ai = ref({ enabled: false, daily_limit: 100, auto_repair: false, max_rounds: 3, available: false })
+const ai = ref({ enabled: false, daily_limit: 100, auto_repair: false, max_rounds: 3, available: false, reason: '', used_today: 0 })
+const savedAI = ref({})
+const AI_KEYS = ['enabled', 'daily_limit', 'auto_repair', 'max_rounds']
+const aiDirty = computed(() => AI_KEYS.some((k) => ai.value[k] !== savedAI.value[k]))
+
+async function refreshAI() {
+  ai.value = await getAISettings()
+  savedAI.value = { ...ai.value }
+}
 const providers = ref([])
 const generations = ref([])
 const genTotal = ref(0)
@@ -254,7 +262,7 @@ async function sendTestAlert() {
 const baseUrlSuggestions = (q, cb) => cb(BASE_URLS[pf.value.protocol].filter((u) => !q || u.includes(q)).map((value) => ({ value })))
 
 async function load() {
-  ai.value = await getAISettings()
+  await refreshAI()
   alert.value = await getAlertSettings()
   crawler.value = await getCrawlerSettings()
   proxiesText.value = crawler.value.proxies.join('\n')
@@ -271,8 +279,9 @@ async function loadGenerations() {
 }
 
 async function saveSettings() {
-  const { available, ...body } = ai.value
+  const body = Object.fromEntries(AI_KEYS.map((k) => [k, ai.value[k]]))
   ai.value = await putAISettings(body)
+  savedAI.value = { ...ai.value }
   ElMessage.success('已保存')
 }
 
@@ -298,7 +307,7 @@ async function test(row) {
   testing.value = row.id
   try {
     const r = await testProvider(row.id)
-    if (r.ok) ElMessage.success(r.message)
+    if (r.ok) ElMessage.success(row.enabled ? r.message : `${r.message}（注意：该模型未启用，请编辑后勾选"启用"）`)
     else ElMessageBox.alert(r.message, '连接失败', { type: 'error' })
   } finally {
     testing.value = null
