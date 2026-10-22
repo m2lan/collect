@@ -115,7 +115,8 @@
             <el-button>模板<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item v-for="t in templates" :key="t.id" :command="t">从模板导入：{{ t.name }}</el-dropdown-item>
+                <el-dropdown-item v-for="t in builtin" :key="t.key" :command="t">内置模板：{{ t.name }}</el-dropdown-item>
+                <el-dropdown-item v-for="t in templates" :key="t.id" :command="t" :divided="t === templates[0] && builtin.length > 0">从模板导入：{{ t.name }}</el-dropdown-item>
                 <el-dropdown-item v-if="!templates.length" disabled>暂无模板</el-dropdown-item>
                 <el-dropdown-item command="save" divided>将当前规则保存为模板</el-dropdown-item>
               </el-dropdown-menu>
@@ -164,6 +165,10 @@
             <div v-if="schedules.full.next_run_at" class="muted">下次执行：{{ fmtTime(schedules.full.next_run_at) }}</div>
           </el-form-item>
           <el-divider />
+          <el-form-item label="临近结束加密盯价">
+            <el-switch v-model="form.ending_boost" />
+            <span class="muted" style="margin-left: 12px">有拍品即将结束时自动提高刷新频率（窗口和间隔在系统设置中配置）</span>
+          </el-form-item>
           <el-form-item label="盯价">
             <el-switch v-model="schedules.live.enabled" />
             <span class="muted" style="margin-left: 12px">只刷新"进行中"的拍品价格；规则配置了详情页时逐个抓取详情页，否则重新抓取列表页</span>
@@ -210,7 +215,7 @@ import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   activateRule, aiGenerate, clearSession, createSource, createTemplate, getAISettings, listRules, listSchedules,
-  listTemplates, preview, saveSchedules, updateSource,
+  listTemplates, preview, saveSchedules, updateSource, builtinTemplates,
 } from '../api'
 import { fmtTime } from '../format'
 import CronInput from './CronInput.vue'
@@ -277,6 +282,7 @@ async function openRemote() {
   remoteVisible.value = true
 }
 const templates = ref([])
+const builtin = ref([])
 const emptySchedules = () => ({
   full: { kind: 'full', enabled: false, cron: '0 */2 * * *', next_run_at: null },
   live: { kind: 'live', enabled: false, cron: '*/5 * * * *', next_run_at: null },
@@ -307,6 +313,7 @@ async function init() {
     enabled: s?.enabled ?? true,
     allow_ai_repair: s?.allow_ai_repair ?? true,
     use_proxy: s?.use_proxy ?? false,
+    ending_boost: s?.ending_boost ?? false,
     auth_type: s?.auth_type || 'none',
     auth: { ...emptyAuth(), ...pickAuth(s?.auth) },
   }
@@ -328,7 +335,7 @@ async function init() {
   }
   rules.value = s ? await listRules(s.id) : []
   aiAvailable.value = (await getAISettings()).available
-  templates.value = await listTemplates()
+  ;[templates.value, builtin.value] = await Promise.all([listTemplates(), builtinTemplates()])
 }
 
 function pickAuth(a) {

@@ -2,7 +2,7 @@
   <el-dialog :model-value="modelValue" title="可视化选取" fullscreen :close-on-click-modal="false"
     @update:model-value="emit('update:modelValue', $event)" @open="load">
     <div class="picker">
-      <div class="frame-wrap" v-loading="loading" element-loading-text="正在抓取页面…">
+      <div class="frame-wrap">
         <div class="toolbar">
           <el-radio-group v-model="mode" size="small">
             <el-radio-button value="item">① 选择拍品</el-radio-button>
@@ -16,7 +16,11 @@
           </template>
           <span class="muted">{{ HINT[mode] }}</span>
         </div>
-        <iframe ref="frame" class="frame" sandbox="allow-same-origin" :srcdoc="html" @load="attach" />
+        <div class="frame-box">
+          <iframe ref="frame" class="frame" sandbox="allow-same-origin" :srcdoc="html" @load="attach" />
+          <!-- 不用 v-loading：其淡出动画偶尔卡住，遮罩会挡住对 iframe 的点击 -->
+          <div v-if="loading" class="frame-loading"><el-icon class="is-loading"><Loading /></el-icon>正在抓取页面…</div>
+        </div>
       </div>
 
       <div class="panel">
@@ -76,6 +80,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Loading } from '@element-plus/icons-vue'
 import { snapshot } from '../api'
 
 const props = defineProps({ modelValue: Boolean, request: Object, baseRule: Object })
@@ -376,7 +381,10 @@ function finish() {
 <style scoped>
 .picker { display: flex; gap: 12px; height: calc(100vh - 140px); }
 .frame-wrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.frame { flex: 1; width: 100%; border: 1px solid #dcdfe6; border-radius: 4px; background: #fff; }
+.frame-box { flex: 1; position: relative; display: flex; }
+.frame { flex: 1; width: 100%; border: 1px solid var(--c-border); border-radius: 8px; background: #fff; }
+.frame-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: rgba(255, 255, 255, .85); color: var(--c-text-2); border-radius: 8px; }
 .panel { width: 360px; overflow-y: auto; padding-right: 4px; }
 .panel h4 { margin: 12px 0 6px; }
 .chain { margin-top: 6px; }

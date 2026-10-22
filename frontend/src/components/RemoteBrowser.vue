@@ -14,9 +14,10 @@
         @keyup.enter="sendText" />
       <el-button size="small" :disabled="!text" @click="sendText">发送</el-button>
     </div>
-    <div ref="screen" v-loading="!frame" element-loading-text="正在启动浏览器…" class="screen" tabindex="0"
+    <div ref="screen" class="screen" tabindex="0"
       @keydown.prevent="onKey" @wheel.prevent="onWheel">
       <img v-if="frame" :src="frame" draggable="false" @click="onClick" @dblclick="onDblClick" />
+      <div v-else class="starting"><el-icon class="is-loading"><Loading /></el-icon>正在启动浏览器…</div>
     </div>
     <div class="muted foot">
       {{ title || '—' }} · 点击画面后可直接用键盘输入英文和数字；中文请用上方输入框。会话空闲 10 分钟自动关闭。
@@ -31,7 +32,7 @@
 <script setup>
 import { onBeforeUnmount, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Back, Link, Refresh } from '@element-plus/icons-vue'
+import { Back, Link, Loading, Refresh } from '@element-plus/icons-vue'
 import http from '../api/http'
 
 const props = defineProps({ modelValue: Boolean, source: Object, url: String })
@@ -168,5 +169,6 @@ onBeforeUnmount(stop)
 .screen { position: relative; width: 100%; aspect-ratio: 1280 / 800; background: #0f172a; border-radius: 8px; overflow: hidden; outline: none; }
 .screen:focus { box-shadow: 0 0 0 2px var(--el-color-primary); }
 .screen img { width: 100%; height: 100%; display: block; cursor: pointer; user-select: none; }
+.starting { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; color: #cbd5e1; }
 .foot { margin-top: 6px; }
 </style>

@@ -1,5 +1,7 @@
 <template>
-  <el-card>
+  <div class="page">
+  <PageHeader title="采集记录" desc="每次采集的结果、耗时、失败原因与详细日志" />
+  <el-card shadow="never">
     <div class="toolbar">
       <el-select v-model="sourceId" placeholder="全部站点" clearable style="width: 200px" @change="search">
         <el-option v-for="s in sources" :key="s.id" :label="s.name" :value="s.id" />
@@ -18,12 +20,13 @@
         <template #default="{ row }">{{ row.items_found }} / {{ row.items_new }} / {{ row.items_updated }}</template>
       </el-table-column>
       <el-table-column label="开始时间" width="150"><template #default="{ row }">{{ fmtTime(row.started_at) }}</template></el-table-column>
-      <el-table-column label="耗时" width="80"><template #default="{ row }">{{ duration(row) }}</template></el-table-column>
+      <el-table-column label="耗时" width="80"><template #default="{ row }">{{ fmtDuration(row.duration_ms) || duration(row) }}</template></el-table-column>
       <el-table-column label="类型" width="90">
-        <template #default="{ row }">{{ row.trigger === 'cron' ? '定时' : '手动' }}{{ row.kind === 'live' ? '·盯价' : '' }}</template>
+        <template #default="{ row }">{{ TRIGGER[row.trigger] || row.trigger }}{{ KIND[row.kind] || '' }}</template>
       </el-table-column>
-      <el-table-column label="错误信息" min-width="220">
+      <el-table-column label="错误信息" min-width="240">
         <template #default="{ row }">
+          <el-tag v-if="row.error_type" disable-transitions size="small" type="danger" effect="plain" style="margin-right: 6px">{{ ERROR_TYPE[row.error_type] }}</el-tag>
           <el-tooltip v-if="row.error" :content="row.error" placement="top" popper-class="run-error">
             <span class="error">{{ row.error }}</span>
           </el-tooltip>
@@ -47,13 +50,18 @@
       <div v-if="!logRun.log?.length" class="muted">暂无日志</div>
     </div>
   </el-drawer>
+  </div>
 </template>
 
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { getRun, listRuns, listSources } from '../api'
-import { RUN_STATUS, fmtTime } from '../format'
+import { ERROR_TYPE, RUN_STATUS, fmtDuration, fmtTime } from '../format'
+import PageHeader from '../components/PageHeader.vue'
+
+const TRIGGER = { manual: '手动', cron: '定时', boost: '加密盯价' }
+const KIND = { live: '·盯价', ending: '·临近结束' }
 
 const route = useRoute()
 const sourceId = ref(route.query.source_id ? Number(route.query.source_id) : null)
