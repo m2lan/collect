@@ -1,5 +1,6 @@
 from app.models.entities import (
     AIGeneration,
+    AuditLog,
     CrawlRun,
     LLMProvider,
     Lot,
@@ -15,5 +16,5 @@ from app.models.entities import (
 )
 
 __all__ = [
-    "AIGeneration", "CrawlRun", "LLMProvider", "Lot", "Notification", "Subscription", "PriceSnapshot", "Rule", "RuleTemplate", "Schedule", "Source", "SystemSetting", "User",
+    "AIGeneration", "AuditLog", "CrawlRun", "LLMProvider", "Lot", "Notification", "Subscription", "PriceSnapshot", "Rule", "RuleTemplate", "Schedule", "Source", "SystemSetting", "User",
 ]

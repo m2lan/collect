@@ -1,10 +1,10 @@
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 
 from app.ai import service
 from app.ai.providers import LLMError, Message
-from app.api.deps import SessionDep
+from app.api.deps import SessionDep, admin
 from app.api.sources import build_context
 from app.models import AIGeneration, LLMProvider, Source
 from app.schemas.api import (
@@ -20,6 +20,7 @@ from app.security import decrypt_json, encrypt_json
 from app.settings_store import get_settings_dict, set_setting
 
 router = APIRouter(prefix="/ai", tags=["ai"])
+ADMIN = [Depends(admin)]
 
 
 def _mask(key: str | None) -> str:
@@ -47,7 +48,7 @@ async def get_ai_settings(session: SessionDep) -> dict:
     return {**settings.model_dump(), "available": available, "reason": reason, "used_today": await service.used_today(session)}
 
 
-@router.put("/settings")
+@router.put("/settings", dependencies=ADMIN)
 async def put_ai_settings(body: AISettings, session: SessionDep) -> dict:
     for k, v in body.model_dump().items():
         await set_setting(session, f"ai.{k}", v)
@@ -55,7 +56,7 @@ async def put_ai_settings(body: AISettings, session: SessionDep) -> dict:
     return await get_ai_settings(session)
 
 
-@router.get("/providers", response_model=list[ProviderOut])
+@router.get("/providers", response_model=list[ProviderOut], dependencies=ADMIN)
 async def list_providers(session: SessionDep) -> list[ProviderOut]:
     rows = (await session.scalars(select(LLMProvider).order_by(LLMProvider.id))).all()
     return [_provider_out(r) for r in rows]
@@ -75,7 +76,7 @@ async def _single_default(session: SessionDep, row: LLMProvider) -> None:
         await session.execute(update(LLMProvider).where(LLMProvider.id != row.id).values(is_default=False))
 
 
-@router.post("/providers", response_model=ProviderOut, status_code=status.HTTP_201_CREATED)
+@router.post("/providers", response_model=ProviderOut, status_code=status.HTTP_201_CREATED, dependencies=ADMIN)
 async def create_provider(body: ProviderIn, session: SessionDep) -> ProviderOut:
     if not body.api_key:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "请填写 API Key")
@@ -97,7 +98,7 @@ async def _get_provider(session: SessionDep, provider_id: int) -> LLMProvider:
     return row
 
 
-@router.put("/providers/{provider_id}", response_model=ProviderOut)
+@router.put("/providers/{provider_id}", response_model=ProviderOut, dependencies=ADMIN)
 async def update_provider(provider_id: int, body: ProviderIn, session: SessionDep) -> ProviderOut:
     row = await _get_provider(session, provider_id)
     _apply(row, body)
@@ -106,13 +107,13 @@ async def update_provider(provider_id: int, body: ProviderIn, session: SessionDe
     return _provider_out(row)
 
 
-@router.delete("/providers/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/providers/{provider_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=ADMIN)
 async def delete_provider(provider_id: int, session: SessionDep) -> None:
     await session.delete(await _get_provider(session, provider_id))
     await session.commit()
 
 
-@router.post("/providers/{provider_id}/test")
+@router.post("/providers/{provider_id}/test", dependencies=ADMIN)
 async def test_provider(provider_id: int, session: SessionDep) -> dict:
     """发送一个最小的结构化输出请求，验证 Key、模型与工具调用是否可用。"""
     row = await _get_provider(session, provider_id)
