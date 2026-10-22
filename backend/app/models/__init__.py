@@ -3,15 +3,17 @@ from app.models.entities import (
     CrawlRun,
     LLMProvider,
     Lot,
+    Notification,
     PriceSnapshot,
     Rule,
     RuleTemplate,
     Schedule,
     Source,
+    Subscription,
     SystemSetting,
     User,
 )
 
 __all__ = [
-    "AIGeneration", "CrawlRun", "LLMProvider", "Lot", "PriceSnapshot", "Rule", "RuleTemplate", "Schedule", "Source", "SystemSetting", "User",
+    "AIGeneration", "CrawlRun", "LLMProvider", "Lot", "Notification", "Subscription", "PriceSnapshot", "Rule", "RuleTemplate", "Schedule", "Source", "SystemSetting", "User",
 ]

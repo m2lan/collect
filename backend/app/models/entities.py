@@ -52,6 +52,8 @@ class Source(Base):
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     allow_ai_repair: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     use_proxy: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # 临近结束加密盯价：有拍品即将结束时自动提高刷新频率
+    ending_boost: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     # 登录失效时间（Cookie / 人工登录会话失效后记录，成功采集后清空）
     login_expired_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
@@ -117,6 +119,9 @@ class Lot(Base):
     start_time: Mapped[datetime | None] = mapped_column(UTCDateTime())
     end_time: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
     extra: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict)
+    # AI 结构化标签：{"category": "瓷器", "era": "清", "material": "...", ...}
+    tags: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, server_default="{}")
+    tagged_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
 
@@ -205,3 +210,43 @@ class RuleTemplate(Base):
     fetch_mode: Mapped[str] = mapped_column(String(16), default="static")
     config: Mapped[dict[str, Any]] = mapped_column(JSONType)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class Subscription(Base):
+    """订阅：符合条件的拍品发生指定事件时推送通知。"""
+
+    __tablename__ = "subscription"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    keywords: Mapped[list[str]] = mapped_column(JSONType, default=list)  # 标题包含任一关键词（空 = 不限）
+    exclude_keywords: Mapped[list[str]] = mapped_column(JSONType, default=list)
+    source_ids: Mapped[list[int]] = mapped_column(JSONType, default=list)  # 空 = 全部站点
+    tags: Mapped[list[str]] = mapped_column(JSONType, default=list)  # AI 标签包含任一（空 = 不限）
+    min_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    max_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    # 事件：new 新上架 / price_change 价格变化 / price_reach 价格达到 target_price / ending_soon 即将结束
+    events: Mapped[list[str]] = mapped_column(JSONType, default=list)
+    target_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    ending_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    webhook_type: Mapped[str | None] = mapped_column(String(16))  # 为空使用全局告警通知
+    webhook_url: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class Notification(Base):
+    """已发送的订阅通知（同一订阅、拍品、事件只通知一次，价格变化按价格区分）。"""
+
+    __tablename__ = "notification"
+    __table_args__ = (UniqueConstraint("subscription_id", "lot_id", "event", "dedupe_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    subscription_id: Mapped[int] = mapped_column(ForeignKey("subscription.id", ondelete="CASCADE"), index=True)
+    lot_id: Mapped[int] = mapped_column(ForeignKey("lot.id", ondelete="CASCADE"), index=True)
+    event: Mapped[str] = mapped_column(String(16))
+    dedupe_key: Mapped[str] = mapped_column(String(64), default="")
+    message: Mapped[str] = mapped_column(Text)
+    sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)

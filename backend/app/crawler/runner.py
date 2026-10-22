@@ -17,13 +17,14 @@ from app.crawler.fetchers.base import USER_AGENTS
 from app.crawler.errors import classify_error
 from app.crawler.health import update_health
 from app.crawler.throttle import domain_of, throttle
-from app.crawler.pipeline import upsert_lots
+from app.crawler.pipeline import UpsertStats, upsert_lots
 from app.db import SessionLocal
 from app.models import CrawlRun, Lot, Rule, Source
 from app.models.entities import utcnow
 from app.schemas.rule import RuleConfig
 from app.notify import notify
 from app.security import decrypt_json, encrypt_json
+from app.subscriptions import notify_after_crawl
 from app.settings_store import get_setting
 
 log = logging.getLogger(__name__)
@@ -271,22 +272,22 @@ async def maybe_auto_repair(source_id: int) -> None:
 
 
 async def _live_refresh(
-    session: AsyncSession, source: Source, config: RuleConfig, ctx: FetchContext, run: CrawlRun, runlog: RunLog
-) -> tuple[int, int, int]:
-    """盯价：只刷新进行中的拍品。配置了详情页时逐个抓取详情，否则重新抓取列表页。返回 (页数/详情数, 抓取数, 变化数)。"""
+    session: AsyncSession, source: Source, config: RuleConfig, ctx: FetchContext, run: CrawlRun, runlog: RunLog,
+    ending_window: int | None = None,
+) -> tuple[int, int, UpsertStats]:
+    """盯价：只刷新进行中的拍品（ending_window 给定时只刷新该分钟数内结束的）。
+    配置了详情页时逐个抓取详情，否则重新抓取列表页。返回 (页数/详情数, 抓取数, 入库统计)。"""
     now = utcnow()
-    lots = (
-        await session.scalars(
-            select(Lot)
-            .where(Lot.source_id == source.id, Lot.status == "live")
-            .where(or_(Lot.end_time.is_(None), Lot.end_time > now - timedelta(hours=1)))
-            .order_by(Lot.end_time.asc().nulls_last())
-            .limit(LIVE_LIMIT)
-        )
-    ).all()
-    runlog.info(f"盯价：找到 {len(lots)} 个进行中的拍品")
+    stmt = select(Lot).where(Lot.source_id == source.id, Lot.status == "live")
+    if ending_window:
+        stmt = stmt.where(Lot.end_time > now - timedelta(minutes=5), Lot.end_time <= now + timedelta(minutes=ending_window))
+    else:
+        stmt = stmt.where(or_(Lot.end_time.is_(None), Lot.end_time > now - timedelta(hours=1)))
+    lots = (await session.scalars(stmt.order_by(Lot.end_time.asc().nulls_last()).limit(LIVE_LIMIT))).all()
+    what = f"{ending_window} 分钟内结束" if ending_window else "进行中"
+    runlog.info(f"盯价：找到 {len(lots)} 个{what}的拍品")
     if not lots:
-        return 0, 0, 0
+        return 0, 0, UpsertStats()
 
     if not config.detail.enabled:
         runlog.info("规则未配置详情页，重新抓取列表页以刷新价格")
@@ -295,7 +296,7 @@ async def _live_refresh(
         key_field = config.list.unique_key or "url"
         items = [it for it in result.items if str(it.get(key_field) or it.get("url")) in live_keys]
         stats = await upsert_lots(session, source.id, run.id, items, config.list.unique_key)
-        return result.pages, len(items), stats.updated
+        return result.pages, len(items), stats
 
     key_field = config.list.unique_key or "url"
     items: list[dict[str, Any]] = []
@@ -319,12 +320,13 @@ async def _live_refresh(
             values, _ = extract_detail(fetched.html, fetched.url, config.detail)
             items.append({**{k: v for k, v in values.items() if v is not None}, key_field: lot.unique_key, "url": lot.url})
     stats = await upsert_lots(session, source.id, run.id, items, key_field)
-    return len(items), len(items), stats.updated
+    return len(items), len(items), stats
 
 
 async def run_crawl(run_id: int) -> None:
     runlog = RunLog()
     items: list[dict[str, Any]] | None = None
+    stats: UpsertStats | None = None
     async with SessionLocal() as session:
         run = await session.get(CrawlRun, run_id)
         if run is None:
@@ -353,8 +355,10 @@ async def run_crawl(run_id: int) -> None:
 
             ctx.on_storage_state = save_state
 
-            if run.kind == "live":
-                run.pages, run.items_found, run.items_updated = await _live_refresh(session, source, config, ctx, run, runlog)
+            if run.kind in ("live", "ending"):
+                window = int(await get_setting(session, "live.boost_window_minutes") or 30) if run.kind == "ending" else None
+                run.pages, run.items_found, stats = await _live_refresh(session, source, config, ctx, run, runlog, window)
+                run.items_updated = stats.updated
                 run.status = "success"
                 runlog.info(f"盯价完成：刷新 {run.items_found} 个拍品，价格/状态变化 {run.items_updated} 个")
             else:
@@ -370,6 +374,7 @@ async def run_crawl(run_id: int) -> None:
                 run.pages = result.pages
                 run.items_found = len(result.items)
                 run.items_new, run.items_updated = stats.new, stats.updated
+                await session.commit()
                 runlog.info(f"入库完成：抓取 {len(result.items)} 条，新增 {stats.new} 条，价格/状态变化 {stats.updated} 条")
                 run.status = "success" if result.items else "failed"
                 if not result.items:
@@ -407,11 +412,16 @@ async def run_crawl(run_id: int) -> None:
         needs_repair = False
         source = await session.get(Source, run.source_id)
         # 盯价任务只刷新已有拍品，不参与规则健康判定
-        if source is not None and run.kind != "live":
+        if source is not None and run.kind == "full":
             needs_repair = await update_health(session, source, run, items)
             if source.health != "ok":
                 runlog.warn(f"规则健康状态：{source.health}，{source.health_message}")
         run.log = runlog.entries
         await session.commit()
+        if stats is not None:
+            try:
+                await notify_after_crawl(session, stats.new_ids, stats.price_changes)
+            except Exception:
+                log.exception("subscription notify failed for run %s", run_id)
         if needs_repair and source is not None:
             await maybe_auto_repair(source.id)

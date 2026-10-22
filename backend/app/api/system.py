@@ -28,16 +28,21 @@ async def test_alert(body: AlertSettings) -> dict:
     return {"ok": ok, "message": detail}
 
 
+LIVE_KEYS = ("boost_window_minutes", "boost_interval_minutes")
+
+
 @router.get("/crawler", response_model=CrawlerSettings)
 async def get_crawler(session: SessionDep) -> CrawlerSettings:
     s = await get_settings_dict(session, "crawler.")
-    return CrawlerSettings(**{k.removeprefix("crawler."): v for k, v in s.items()})
+    live = await get_settings_dict(session, "live.")
+    return CrawlerSettings(**{k.removeprefix("crawler."): v for k, v in s.items()},
+                           **{k.removeprefix("live."): v for k, v in live.items()})
 
 
 @router.put("/crawler", response_model=CrawlerSettings)
 async def put_crawler(body: CrawlerSettings, session: SessionDep) -> CrawlerSettings:
     body.proxies = [p.strip() for p in body.proxies if p.strip()]
     for k, v in body.model_dump().items():
-        await set_setting(session, f"crawler.{k}", v)
+        await set_setting(session, f"{'live' if k in LIVE_KEYS else 'crawler'}.{k}", v)
     await session.commit()
     return body

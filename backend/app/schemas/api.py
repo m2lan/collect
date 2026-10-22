@@ -57,6 +57,7 @@ class SourceBase(BaseModel):
     enabled: bool = True
     allow_ai_repair: bool = True
     use_proxy: bool = False
+    ending_boost: bool = False
 
 
 class SourceIn(SourceBase):
@@ -226,6 +227,8 @@ class CrawlerSettings(BaseModel):
     random_ua: bool = True
     stealth: bool = True
     domain_interval: float = Field(1.0, ge=0, le=60)
+    boost_window_minutes: int = Field(30, ge=1, le=1440)
+    boost_interval_minutes: float = Field(1, ge=0.5, le=60)
 
 
 class TemplateIn(BaseModel):
@@ -323,6 +326,47 @@ class GenerationOut(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     duration_ms: int
+    error: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+SubscriptionEvent = Literal["new", "price_change", "price_reach", "ending_soon"]
+
+
+class SubscriptionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    enabled: bool = True
+    keywords: list[str] = Field(default_factory=list)
+    exclude_keywords: list[str] = Field(default_factory=list)
+    source_ids: list[int] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    min_price: Decimal | None = None
+    max_price: Decimal | None = None
+    events: list[SubscriptionEvent] = Field(min_length=1)
+    target_price: Decimal | None = None
+    ending_minutes: int = Field(30, ge=1, le=1440)
+    webhook_type: Literal["generic", "wecom", "dingtalk", "feishu"] | None = None
+    webhook_url: str | None = None
+
+
+class SubscriptionOut(SubscriptionIn):
+    id: int
+    created_at: datetime
+    notified: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class NotificationOut(BaseModel):
+    id: int
+    subscription_id: int
+    subscription_name: str | None = None
+    lot_id: int
+    event: str
+    message: str
+    sent: bool
     error: str | None
     created_at: datetime
 
