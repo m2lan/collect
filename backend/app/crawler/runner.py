@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.crawler.extractor import extract_captured, extract_detail, extract_page, page_urls
 from app.crawler.fetchers import FetchContext, Fetched, Fetcher, LoginError, open_fetcher
 from app.crawler.fetchers.base import USER_AGENTS
+from app.ai.tagging import auto_tag_new
 from app.crawler.errors import classify_error
 from app.crawler.health import update_health
 from app.crawler.throttle import domain_of, throttle
@@ -419,6 +420,11 @@ async def run_crawl(run_id: int) -> None:
         run.log = runlog.entries
         await session.commit()
         if stats is not None:
+            try:
+                # 先标注新拍品，订阅中按标签筛选才能命中
+                await auto_tag_new(stats.new_ids)
+            except Exception:
+                log.exception("auto tag failed for run %s", run_id)
             try:
                 await notify_after_crawl(session, stats.new_ids, stats.price_changes)
             except Exception:

@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from app.api.deps import SessionDep
 from app.notify import send_webhook
 from app.schemas.api import AlertSettings, CrawlerSettings
-from app.settings_store import get_settings_dict, set_setting
+from app.settings_store import get_setting, get_settings_dict, set_setting
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -46,3 +46,15 @@ async def put_crawler(body: CrawlerSettings, session: SessionDep) -> CrawlerSett
         await set_setting(session, f"{'live' if k in LIVE_KEYS else 'crawler'}.{k}", v)
     await session.commit()
     return body
+
+
+@router.get("/search")
+async def get_search(session: SessionDep) -> dict:
+    return {"synonyms": await get_setting(session, "search.synonyms")}
+
+
+@router.put("/search")
+async def put_search(body: dict, session: SessionDep) -> dict:
+    await set_setting(session, "search.synonyms", str(body.get("synonyms") or ""))
+    await session.commit()
+    return await get_search(session)

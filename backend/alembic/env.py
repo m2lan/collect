@@ -27,6 +27,14 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+# 手写迁移维护、不在模型中声明的数据库对象（如 PostgreSQL 的 pg_trgm 索引）
+UNMANAGED_INDEXES = {"ix_lot_title_trgm"}
+
+
+def include_object(obj, name, type_, reflected, compare_to):
+    return not (type_ == "index" and name in UNMANAGED_INDEXES)
+
+
 def render_item(type_, obj, autogen_context):
     """UTCDateTime 只是 Python 侧的转换，迁移中按普通 DateTime 渲染。"""
     from app.db import UTCDateTime
@@ -69,7 +77,8 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, render_as_batch=True, render_item=render_item)
+    context.configure(connection=connection, target_metadata=target_metadata, render_as_batch=True, render_item=render_item,
+        include_object=include_object)
 
     with context.begin_transaction():
         context.run_migrations()

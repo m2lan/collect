@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 
 from app.ai import service
@@ -173,3 +174,17 @@ async def usage(session: SessionDep) -> dict:
         )
     ).one()
     return {"calls": row[0], "prompt_tokens": row[1], "completion_tokens": row[2]}
+
+
+class TagIn(BaseModel):
+    lot_ids: list[int] | None = None
+    limit: int = Field(100, ge=1, le=2000)
+
+
+@router.post("/tag")
+async def tag(body: TagIn, session: SessionDep) -> dict:
+    """为指定拍品（或尚未标注的拍品）做 AI 结构化标注。"""
+    from app.ai.tagging import tag_lots
+
+    await service.ensure_ai_available(session)
+    return await tag_lots(session, body.lot_ids, body.limit)

@@ -184,6 +184,7 @@ class LotOut(BaseModel):
     start_time: datetime | None
     end_time: datetime | None
     extra: dict[str, Any]
+    tags: dict[str, Any] = Field(default_factory=dict)
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -213,6 +214,7 @@ class AISettings(BaseModel):
     enabled: bool = False
     daily_limit: int = Field(100, ge=0)
     auto_repair: bool = False
+    auto_tag: bool = False
     max_rounds: int = Field(3, ge=1, le=6)
 
 
