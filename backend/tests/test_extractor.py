@@ -92,3 +92,9 @@ def test_captured_json_template_and_map():
     assert page.items[0]["title"] == "翡翠" and page.items[0]["status"] == "live" and page.items[1]["status"] == "upcoming"
     assert page.items[0]["url"] == "https://zc-item.taobao.com/auction/1.htm"
     assert "没有截获" in extract_captured(responses[1:], "x", rule).errors[0]
+
+
+def test_user_agents_are_chromium():
+    from app.crawler.fetchers.base import USER_AGENTS
+
+    assert all("Chrome/" in ua and "Firefox" not in ua for ua in USER_AGENTS)

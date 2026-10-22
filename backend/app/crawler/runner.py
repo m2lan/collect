@@ -153,8 +153,12 @@ async def crawl(
             else:
                 page = extract_page(fetched.html, fetched.url, config)
             result.pages += 1
-            new_items = [it for it in page.items if _item_key(it, key_field) not in item_keys]
-            item_keys.update(_item_key(it, key_field) for it in page.items)
+            new_items = []
+            for it in page.items:  # 同一页内也要去重（有的页面会重复请求同一个列表接口）
+                k = _item_key(it, key_field)
+                if k not in item_keys:
+                    item_keys.add(k)
+                    new_items.append(it)
             result.items.extend(new_items)
             result.errors.extend(page.errors)
             runlog.info(
