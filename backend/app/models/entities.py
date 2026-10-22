@@ -51,6 +51,8 @@ class Source(Base):
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     allow_ai_repair: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     use_proxy: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # 登录失效时间（Cookie / 人工登录会话失效后记录，成功采集后清空）
+    login_expired_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     rules: Mapped[list["Rule"]] = relationship(back_populates="source", cascade="all, delete-orphan")

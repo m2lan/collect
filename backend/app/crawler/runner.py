@@ -20,6 +20,7 @@ from app.db import SessionLocal
 from app.models import CrawlRun, Lot, Rule, Source
 from app.models.entities import utcnow
 from app.schemas.rule import RuleConfig
+from app.notify import notify
 from app.security import decrypt_json, encrypt_json
 from app.settings_store import get_setting
 
@@ -323,6 +324,8 @@ async def run_crawl(run_id: int) -> None:
             config = RuleConfig.model_validate(rule.config)
             ctx = context_for(source)
             ctx.proxy, ctx.user_agent = await network_options(session, source.use_proxy)
+            if ctx.auth_config.get("user_agent"):
+                ctx.user_agent = ctx.auth_config["user_agent"]  # 人工登录会话与登录时的 UA 绑定
             mode = config.fetch.mode or source.fetch_mode
             runlog.info(
                 f"开始{'盯价' if run.kind == 'live' else '采集'}：{source.name}，规则 v{rule.version}，抓取方式 {mode}"
@@ -360,6 +363,16 @@ async def run_crawl(run_id: int) -> None:
                     runlog.error(run.error)
                 elif result.errors:
                     run.error = "\n".join(result.errors[:20])
+        except LoginError as exc:
+            await session.rollback()
+            run = await session.get(CrawlRun, run_id)
+            assert run
+            run.status, run.error = "failed", str(exc)[:4000]
+            runlog.error(run.error)
+            src = await session.get(Source, run.source_id)
+            if src is not None and src.login_expired_at is None:
+                src.login_expired_at = utcnow()
+                await notify(session, f"登录失效：{src.name}", f"{exc}\n站点：{src.start_url}")
         except Exception as exc:
             log.exception("crawl run %s failed", run_id)
             await session.rollback()
@@ -368,6 +381,12 @@ async def run_crawl(run_id: int) -> None:
             run.status, run.error = "failed", f"{type(exc).__name__}: {exc}"[:4000]
             runlog.error(run.error)
         run.finished_at = utcnow()
+        if run.status == "success":
+            src = await session.get(Source, run.source_id)
+            if src is not None and src.login_expired_at is not None:
+                src.login_expired_at = None
+                runlog.info("登录状态已恢复正常")
+                await notify(session, f"登录已恢复：{src.name}", "采集恢复正常")
         needs_repair = False
         source = await session.get(Source, run.source_id)
         # 盯价任务只刷新已有拍品，不参与规则健康判定

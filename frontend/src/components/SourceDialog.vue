@@ -35,10 +35,30 @@
           <el-form-item label="登录方式">
             <el-radio-group v-model="form.auth_type">
               <el-radio value="none">无需登录</el-radio>
+              <el-radio value="session">人工登录（扫码 / 验证码）</el-radio>
               <el-radio value="cookie">粘贴 Cookie</el-radio>
               <el-radio value="form">账号密码自动登录</el-radio>
             </el-radio-group>
           </el-form-item>
+          <template v-if="form.auth_type === 'session'">
+            <el-form-item label="登录会话">
+              <div>
+                <el-tag v-if="source?.auth?.has_session" disable-transitions type="success">已保存（{{ fmtTime(source.auth.session_saved_at) }}）</el-tag>
+                <el-tag v-else disable-transitions type="info">尚未登录</el-tag>
+                <el-button type="primary" plain style="margin-left: 8px" @click="openRemote">打开远程浏览器登录</el-button>
+              </div>
+              <div class="muted">在服务器上的真实浏览器中完成扫码、验证码、短信登录或 Cloudflare 等人机验证，然后保存登录状态。</div>
+            </el-form-item>
+          </template>
+          <template v-if="form.auth_type === 'cookie' || form.auth_type === 'session'">
+            <el-form-item label="已登录标志选择器">
+              <el-input v-model="form.auth.logged_in_selector" placeholder=".user-name（只有登录后才出现的元素，用于检测登录是否失效）" />
+            </el-form-item>
+            <el-form-item label="登录页 URL">
+              <el-input v-model="form.auth.login_url" placeholder="可选：被跳转到此页面即视为登录失效；远程登录时也会直接打开它" />
+              <div class="muted">设置后，采集时若检测到登录失效会停止并通过告警通知提醒你重新登录。</div>
+            </el-form-item>
+          </template>
           <template v-if="form.auth_type === 'cookie'">
             <el-form-item label="Cookie">
               <el-input v-model="form.auth.cookies" type="textarea" :rows="5" class="mono"
@@ -182,6 +202,7 @@
 
   <VisualPicker v-model="pickerVisible" :request="pickerRequest" :base-rule="pickerBase" @done="onPicked" />
   <SniffDialog v-model="sniffVisible" :request="pickerRequest" @done="onPicked" />
+  <RemoteBrowser v-model="remoteVisible" :source="source" @saved="emit('saved')" />
 </template>
 
 <script setup>
@@ -195,6 +216,7 @@ import { fmtTime } from '../format'
 import CronInput from './CronInput.vue'
 import VisualPicker from './VisualPicker.vue'
 import SniffDialog from './SniffDialog.vue'
+import RemoteBrowser from './RemoteBrowser.vue'
 import { ArrowDown } from '@element-plus/icons-vue'
 
 const props = defineProps({ modelValue: Boolean, source: Object, aiDraft: Object })
@@ -242,6 +264,18 @@ const pickerVisible = ref(false)
 const pickerRequest = ref(null)
 const pickerBase = ref(null)
 const sniffVisible = ref(false)
+const remoteVisible = ref(false)
+
+async function openRemote() {
+  if (!props.source) {
+    return ElMessage.warning('请先保存站点，再打开远程浏览器登录')
+  }
+  if (props.source.auth_type !== form.value.auth_type) {
+    // 先保存登录方式，远程登录保存的会话才会被采集使用
+    await updateSource(props.source.id, payload())
+  }
+  remoteVisible.value = true
+}
 const templates = ref([])
 const emptySchedules = () => ({
   full: { kind: 'full', enabled: false, cron: '0 */2 * * *', next_run_at: null },

@@ -15,8 +15,13 @@
       <el-table-column label="抓取方式" width="100">
         <template #default="{ row }">{{ row.fetch_mode === 'browser' ? '浏览器' : '静态' }}</template>
       </el-table-column>
-      <el-table-column label="登录" width="90">
-        <template #default="{ row }">{{ AUTH_LABEL[row.auth_type] }}</template>
+      <el-table-column label="登录" width="110">
+        <template #default="{ row }">
+          <span>{{ AUTH_LABEL[row.auth_type] }}</span>
+          <el-tooltip v-if="row.login_expired_at" :content="`登录已失效（${fmtTime(row.login_expired_at)}），点击重新登录`">
+            <el-tag disable-transitions type="danger" size="small" style="margin-left: 4px; cursor: pointer" @click="remote(row)">失效</el-tag>
+          </el-tooltip>
+        </template>
       </el-table-column>
       <el-table-column label="规则" width="70">
         <template #default="{ row }">{{ row.active_rule_version ? `v${row.active_rule_version}` : '未配置' }}</template>
@@ -55,6 +60,7 @@
     </el-table>
   </el-card>
 
+  <RemoteBrowser v-model="remoteVisible" :source="remoteSource" @saved="load" />
   <SourceDialog v-model="dialogVisible" :source="editing" :ai-draft="aiDraft" @saved="load" />
 
   <el-dialog v-model="quickVisible" title="AI 添加站点" width="560px" :close-on-click-modal="false">
@@ -90,8 +96,9 @@ import { MagicStick, Plus } from '@element-plus/icons-vue'
 import { aiGenerate, createSource, crawlLive, crawlSource, deleteSource, getAISettings, getSource, listSources } from '../api'
 import { RUN_STATUS, fmtTime } from '../format'
 import SourceDialog from '../components/SourceDialog.vue'
+import RemoteBrowser from '../components/RemoteBrowser.vue'
 
-const AUTH_LABEL = { none: '无需登录', cookie: 'Cookie', form: '账号密码' }
+const AUTH_LABEL = { none: '无需登录', cookie: 'Cookie', form: '账号密码', session: '人工登录' }
 const HEALTH = { ok: { label: '正常', type: 'success' }, warning: { label: '异常', type: 'warning' }, broken: { label: '失效', type: 'danger' } }
 const router = useRouter()
 const rows = ref([])
@@ -99,6 +106,13 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const editing = ref(null)
 const aiAvailable = ref(false)
+const remoteVisible = ref(false)
+const remoteSource = ref(null)
+
+function remote(row) {
+  remoteSource.value = row
+  remoteVisible.value = true
+}
 const quickVisible = ref(false)
 const quickLoading = ref(false)
 const quick = ref({})

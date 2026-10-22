@@ -40,16 +40,25 @@ _FORM_KEYS = (
 
 def merge_auth(auth_type: str, incoming: AuthIn, stored: dict[str, Any] | None) -> dict[str, Any]:
     stored = stored or {}
-    if auth_type == "cookie":
-        cookies = parse_cookies(incoming.cookies) if incoming.cookies else stored.get("cookies", [])
-        return {"cookies": cookies}
-    if auth_type == "form":
-        merged = {k: stored.get(k) for k in _FORM_KEYS}
-        for k in _FORM_KEYS:
-            v = getattr(incoming, k)
+
+    def pick(*keys: str) -> dict[str, Any]:
+        merged = {k: stored.get(k) for k in keys}
+        for k in keys:
+            v = getattr(incoming, k, None)
             if v:  # 空值保留原配置（编辑时密码不回显）
                 merged[k] = v
         return merged
+
+    # 登录页地址 / 已登录标志用于检测会话是否失效
+    markers = ("login_url", "logged_in_selector")
+    if auth_type == "cookie":
+        cookies = parse_cookies(incoming.cookies) if incoming.cookies else stored.get("cookies", [])
+        return {"cookies": cookies, **pick(*markers)}
+    if auth_type == "form":
+        return pick(*_FORM_KEYS)
+    if auth_type == "session":
+        # 人工登录：浏览器状态单独保存；记住登录时的 User-Agent（Cloudflare 等验证与 UA 绑定）
+        return {**pick(*markers), "user_agent": stored.get("user_agent"), "saved_at": stored.get("saved_at")}
     return {}
 
 
@@ -65,6 +74,7 @@ def _auth_out(source: Source) -> AuthOut:
         submit_selector=cfg.get("submit_selector"),
         logged_in_selector=cfg.get("logged_in_selector"),
         has_session=bool(source.storage_state),
+        session_saved_at=cfg.get("saved_at"),
     )
 
 
@@ -80,6 +90,7 @@ async def _source_out(session: SessionDep, source: Source) -> SourceOut:
         enabled=source.enabled, allow_ai_repair=source.allow_ai_repair, use_proxy=source.use_proxy,
         created_at=source.created_at,
         auth=_auth_out(source), health=source.health, health_message=source.health_message,
+        login_expired_at=source.login_expired_at,
         active_rule=rule.config if rule else None, active_rule_version=rule.version if rule else None,
         lot_count=lot_count or 0, last_run=RunOut.model_validate(last_run) if last_run else None,
     )
@@ -134,10 +145,14 @@ async def create_source(body: SourceIn, session: SessionDep) -> SourceOut:
 @router.put("/{source_id}", response_model=SourceOut)
 async def update_source(source_id: int, body: SourceIn, session: SessionDep) -> SourceOut:
     source = await _get_source(session, source_id)
-    stored = decrypt_json(source.auth_config) if body.auth_type == source.auth_type else None
+    old_auth = decrypt_json(source.auth_config) or {}
+    stored = old_auth if body.auth_type == source.auth_type else None
     new_auth = merge_auth(body.auth_type, body.auth, stored)
-    if new_auth != (decrypt_json(source.auth_config) or {}):
-        source.storage_state = None  # 登录信息变化后旧会话失效
+    credentials = ("login_url", "username", "password")
+    if body.auth_type != source.auth_type or (
+        body.auth_type == "form" and any(new_auth.get(k) != old_auth.get(k) for k in credentials)
+    ):
+        source.storage_state = None  # 登录方式或账号变化后旧会话失效
     source.auth_config = encrypt_json(new_auth)
     for field in ("name", "fetch_mode", "headers", "auth_type", "rate_limit", "enabled", "allow_ai_repair", "use_proxy"):
         setattr(source, field, getattr(body, field))
@@ -251,6 +266,8 @@ async def build_context(session: SessionDep, body: PreviewIn | Any, source: Sour
         storage_state=storage_state,
     )
     ctx.proxy, ctx.user_agent = await network_options(session, body.use_proxy)
+    if ctx.auth_config.get("user_agent"):
+        ctx.user_agent = ctx.auth_config["user_agent"]
     return ctx
 
 

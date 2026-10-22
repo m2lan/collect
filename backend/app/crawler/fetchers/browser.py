@@ -34,11 +34,12 @@ async def _launch(pw: Playwright, proxy: str | None = None) -> Browser:
     )
 
 
-async def _new_context(browser: Browser, ctx: FetchContext) -> BrowserContext:
+async def _new_context(browser: Browser, ctx: FetchContext, viewport: dict[str, int] | None = None) -> BrowserContext:
     context = await browser.new_context(
+        viewport=viewport or {"width": 1366, "height": 900},
         user_agent=ctx.request_headers.get("User-Agent", ctx.user_agent),
         extra_http_headers={k: v for k, v in ctx.headers.items() if k.lower() != "user-agent"},
-        storage_state=ctx.storage_state if ctx.auth_type == "form" else None,
+        storage_state=ctx.storage_state if ctx.uses_storage_state else None,
         locale="zh-CN",
         ignore_https_errors=get_settings().browser_ignore_https_errors,
     )
@@ -243,6 +244,7 @@ class BrowserFetcher:
             assert self.page
             await _do_login(self.page, self.ctx, self.fetch_config.timeout * 1000)
             fetched = await self._load(url)
+        self.ctx.check_session(fetched)
         if fetched.status >= 400:
             raise RuntimeError(f"HTTP {fetched.status}: {url}")
         return fetched

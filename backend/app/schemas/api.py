@@ -40,10 +40,11 @@ class AuthOut(BaseModel):
     submit_selector: str | None = None
     logged_in_selector: str | None = None
     has_session: bool = False
+    session_saved_at: str | None = None
 
 
 FetchMode = Literal["static", "browser"]
-AuthType = Literal["none", "cookie", "form"]
+AuthType = Literal["none", "cookie", "form", "session"]
 
 
 class SourceBase(BaseModel):
@@ -72,6 +73,7 @@ class SourceOut(SourceBase):
     lot_count: int = 0
     health: str = "ok"
     health_message: str | None = None
+    login_expired_at: datetime | None = None
     last_run: "RunOut | None" = None
     created_at: datetime
 

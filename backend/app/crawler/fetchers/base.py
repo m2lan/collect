@@ -25,6 +25,10 @@ class LoginError(Exception):
     pass
 
 
+class LoginExpired(LoginError):
+    """Cookie / 人工登录的会话已失效，需要管理员重新登录（无法自动恢复）。"""
+
+
 @dataclass
 class Fetched:
     url: str
@@ -55,19 +59,32 @@ class FetchContext:
         has_ua = any(k.lower() == "user-agent" for k in self.headers)
         return self.headers if has_ua else {"User-Agent": self.user_agent, **self.headers}
 
-    def needs_login(self, fetched: Fetched) -> bool:
-        if self.auth_type != "form":
-            return False
+    @property
+    def uses_storage_state(self) -> bool:
+        return self.auth_type in ("form", "session")
+
+    def _logged_out(self, fetched: Fetched) -> bool:
+        """跳转到了登录页，或页面上没有“已登录标志”元素。"""
         cfg = self.auth_config
         login_url = cfg.get("login_url") or ""
         if login_url and fetched.url.split("?")[0] == login_url.split("?")[0]:
             return True
         marker = cfg.get("logged_in_selector")
-        if marker:
+        if marker and fetched.html.lstrip()[:1] == "<":
             from parsel import Selector
 
             return not Selector(text=fetched.html).css(marker)
         return False
+
+    def needs_login(self, fetched: Fetched) -> bool:
+        """表单登录：会话失效时自动重新登录。"""
+        return self.auth_type == "form" and self._logged_out(fetched)
+
+    def check_session(self, fetched: Fetched) -> None:
+        """Cookie / 人工登录：会话失效无法自动恢复，抛出 LoginExpired 以便提醒管理员。"""
+        if self.auth_type in ("cookie", "session") and self._logged_out(fetched):
+            how = "重新粘贴 Cookie" if self.auth_type == "cookie" else "在站点管理中使用“远程登录”重新登录"
+            raise LoginExpired(f"登录已失效（{fetched.url}），请{how}")
 
 
 class Fetcher(Protocol):

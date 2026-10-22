@@ -96,7 +96,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/login":
             return self._send(LOGIN_PAGE)
         if url.path == "/list":
-            if self.server.require_login and "sid=ok" not in (self.headers.get("Cookie") or ""):
+            sid = getattr(self.server, "valid_sid", "ok")
+            if self.server.require_login and f"sid={sid}" not in (self.headers.get("Cookie") or ""):
                 return self._send("", 302, {"Location": "/login"})
             page = parse_qs(url.query).get("page", ["1"])[0]
             html = fixture_html(f"list_page{page}.html").replace("<body>", '<body><div id="user">我的</div>', 1)
@@ -116,7 +117,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(lots_page(int(body.get("pageNo", 1)), int(body.get("pageSize", 2))))
         form = parse_qs(raw)
         if form.get("u") == ["alice"] and form.get("p") == ["secret"]:
-            return self._send("", 302, {"Location": "/list", "Set-Cookie": "sid=ok; Path=/"})
+            sid = getattr(self.server, "valid_sid", "ok")
+            return self._send("", 302, {"Location": "/list", "Set-Cookie": f"sid={sid}; Path=/"})
         self._send(LOGIN_PAGE, 401)
 
 
