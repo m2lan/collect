@@ -24,12 +24,23 @@ SYSTEM_PROMPT = """你是网页数据采集专家，负责为拍卖平台的拍�
   / click（selector 为“下一页”按钮的 CSS 选择器，用于没有真实链接、点击后由 JS 加载下一页的网站，仅浏览器模式）。
 - detail：保持 enabled=false。详情页规则会在下一步由你看着详情页单独生成。
 
-## 接口模式（api）
-如果提供了“捕获到的 JSON 接口”且其中包含完整的拍品列表，优先生成 api 模式规则（比解析 HTML 稳定）：
+## 接口数据：截获模式（推荐）与 api 模式
+如果提供了“捕获到的 JSON 接口”且其中包含完整的拍品列表，优先基于接口数据生成规则（比解析 HTML 稳定）。
+**截获模式**（接口 URL 带 sign、token、t 时间戳等签名参数，或需要登录态时必须用它；拿不准时也用它）：
+- fetch.mode="browser"，fetch.capture=接口 URL 的正则（取“域名+路径”并转义，如 maestro\\.lqdt1\\.com/search/list）；
+  同一地址有多种请求时可用 fetch.capture_body 指定请求体中必须包含的文本
+- 浏览器照常打开列表页，系统截获页面自己发出的这个接口的响应来抽取，签名、令牌由页面自己处理
+- 翻页：URL 里有页码参数用 page_param/url_template，否则用 click（点击“下一页”按钮），不能用 next_link
+**api 模式**（仅当接口无需签名、可直接请求时）：
 - fetch.mode="api"，fetch.url=接口地址，fetch.method=GET/POST，POST 时 fetch.body 为请求体 JSON
 - list.item_selector_type="jsonpath"，list.item_selector 为拍品数组的 JSONPath（如 $.data.list[*]）
 - 字段 type="jsonpath"，selector 为相对单个拍品的 JSONPath（如 $.title、$.price.current）
 - 翻页用 url_template 或 page_param，不能用 next_link
+两种模式通用：
+- list.item_selector_type="jsonpath"，item_selector 为拍品数组的 JSONPath（可用 * 通配，如 $.data.*.items.list[*]）
+- 字段可用 type="template" 拼接多个值，selector 写成含 {JSONPath} 占位符的模板，如 "{price}{priceUnit}"（价格与单位）、
+  "https://www.example.com/item/{itemId}.htm"（用编号拼详情链接）、"https:{auctionLink}"（补全协议）
+- 状态等代码值用 transform {"name":"map","mapping":{"ing":"live","before":"upcoming","after":"ended"}} 映射为标准状态
 
 ## 标准字段名（尽量使用）
 title 标题、url 详情链接、image 图片、current_price 当前价、start_price 起拍价、deal_price 成交价、bid_count 出价次数、

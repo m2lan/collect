@@ -1,5 +1,6 @@
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urljoin
@@ -48,16 +49,45 @@ def parse_price(value: str) -> Price | None:
     return price
 
 
-def parse_datetime(value: str) -> datetime | None:
+_REL_DAY = {"前天": -2, "昨天": -1, "今天": 0, "今日": 0, "明天": 1, "明日": 1, "后天": 2}
+_CN_DATE = re.compile(r"(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(\d{1,2})[:：](\d{2})")
+_REL_TIME = re.compile(r"(前天|昨天|今天|今日|明天|明日|后天)\s*(\d{1,2})[:：](\d{2})")
+
+
+def _local_tz() -> ZoneInfo:
+    from app.config import get_settings
+
+    return ZoneInfo(get_settings().timezone)
+
+
+def parse_datetime(value: str, now: datetime | None = None) -> datetime | None:
+    """解析各种时间写法；不带时区的时间按系统设置的时区（默认 Asia/Shanghai）理解。
+
+    支持时间戳、ISO 格式、"2026年10月20日 18:00"、"11月05日10:00"（补全年份）、"预计今天10:00结束"。
+    """
     value = value.strip()
+    tz = _local_tz()
     if re.fullmatch(r"\d{10}(\d{3})?", value):
         ts = int(value)
         return datetime.fromtimestamp(ts / 1000 if ts > 10**11 else ts, UTC)
+    now = (now or datetime.now(UTC)).astimezone(tz)
+    m = _REL_TIME.search(value)
+    if m:
+        day = now.date() + timedelta(days=_REL_DAY[m.group(1)])
+        return datetime(day.year, day.month, day.day, int(m.group(2)), int(m.group(3)), tzinfo=tz)
+    m = _CN_DATE.search(value)
+    if m:
+        year = int(m.group(1)) if m.group(1) else now.year
+        dt = datetime(year, int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5)), tzinfo=tz)
+        if not m.group(1) and dt < now - timedelta(days=180):
+            dt = dt.replace(year=year + 1)  # 跨年："01月05日" 在 12 月看到时指明年
+        return dt
     normalized = re.sub(r"[年月]", "-", value).replace("日", " ").replace("/", "-")
     try:
-        return dateparser.parse(normalized)
+        dt = dateparser.parse(normalized)
     except (ValueError, OverflowError):
         return None
+    return dt.replace(tzinfo=tz) if dt.tzinfo is None else dt
 
 
 def parse_status(value: str) -> str | None:
@@ -94,4 +124,6 @@ def apply_transforms(value: Any, transforms: list[Transform], base_url: str) -> 
                 value = parse_status(text)
             case "regex_replace":
                 value = re.sub(t.pattern or "", t.repl, text)
+            case "map":
+                value = (t.mapping or {}).get(text, value)
     return value

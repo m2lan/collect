@@ -94,7 +94,29 @@ def extract_page(html: str, url: str, config: RuleConfig) -> PageResult:
     return PageResult(items=items, next_url=_next_link(sel, url, config.pagination), errors=errors)
 
 
+_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+
+
+def _render_template(item: Any, template: str) -> str | None:
+    """把模板中的 {jsonpath} 替换为拍品中的值，如 "{price}{priceUnit}"、"https://x.com/item/{itemId}.htm"。
+    所有占位符都取不到值时返回 None。"""
+    found_any = False
+
+    def repl(m: re.Match) -> str:
+        nonlocal found_any
+        values = json_find(item, m.group(1))
+        if not values or values[0] is None:
+            return ""
+        found_any = True
+        return str(values[0])
+
+    out = _PLACEHOLDER.sub(repl, template)
+    return out if found_any else None
+
+
 def _json_field(item: Any, rule: FieldRule, values: dict[str, Any]) -> Any:
+    if rule.type == "template":
+        return _render_template(item, rule.selector)
     if rule.type == "regex":
         source = values.get(rule.from_) if rule.from_ else json.dumps(item, ensure_ascii=False)
         return _regex(rule, source)
@@ -115,6 +137,36 @@ def extract_json(data: Any, url: str, config: RuleConfig) -> PageResult:
         found = found[0]
     errors: list[str] = []
     items = [_extract_values(it, config.list.fields, url, errors, _json_field) for it in found if it is not None]
+    # 同一路径下可能混入结构不同的模块数据，所有字段都取不到值的不算拍品
+    items = [it for it in items if any(v not in (None, "") for v in it.values())]
+    return PageResult(items=items, errors=errors)
+
+
+def parse_json_body(text: str) -> Any:
+    """解析 JSON，兼容 JSONP 包装（如 mtopjsonp1({...})）。"""
+    text = text.strip()
+    m = re.match(r"^[\w$.]+\s*\((.*)\)\s*;?\s*$", text, re.S)
+    return json.loads(m.group(1) if m else text)
+
+
+def matches_capture(config: RuleConfig, response: dict[str, Any]) -> bool:
+    fc = config.fetch
+    if not fc.capture or not re.search(fc.capture, response["url"]):
+        return False
+    return not fc.capture_body or fc.capture_body in (response.get("body") or "")
+
+
+def extract_captured(responses: list[dict[str, Any]], url: str, config: RuleConfig) -> PageResult:
+    """浏览器截获模式：从页面自身发出的、匹配 fetch.capture 的接口响应中抽取拍品。"""
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+    matched = [r for r in responses if matches_capture(config, r)]
+    if not matched:
+        return PageResult(items=[], errors=[f"没有截获到匹配 `{config.fetch.capture}` 的接口请求"])
+    for r in matched:
+        page = extract_json(r["data"], url, config)
+        items.extend(page.items)
+        errors.extend(page.errors)
     return PageResult(items=items, errors=errors)
 
 

@@ -1,11 +1,13 @@
 import inspect
 import json
+import re
 from urllib.parse import unquote, urlsplit
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, Response, async_playwright
 
 from app.config import get_settings
+from app.crawler.extractor import parse_json_body
 from app.crawler.fetchers.base import FetchContext, Fetched, LoginError
 from app.schemas.rule import FetchConfig
 
@@ -38,6 +40,7 @@ async def _new_context(browser: Browser, ctx: FetchContext) -> BrowserContext:
         extra_http_headers={k: v for k, v in ctx.headers.items() if k.lower() != "user-agent"},
         storage_state=ctx.storage_state if ctx.auth_type == "form" else None,
         locale="zh-CN",
+        ignore_https_errors=get_settings().browser_ignore_https_errors,
     )
     if ctx.auth_type == "cookie":
         cookies = []
@@ -114,20 +117,60 @@ class BrowserFetcher:
         await self._pw_cm.__aexit__(None, None, None)
 
     async def _on_response(self, resp: Response) -> None:
-        if resp.request.resource_type not in ("xhr", "fetch"):
+        if resp.request.resource_type not in ("xhr", "fetch", "script"):
             return
-        if "json" not in (resp.headers.get("content-type") or ""):
+        capture = self.fetch_config.capture
+        wanted = bool(capture and re.search(capture, resp.url))
+        # 指定了截获地址时不看 Content-Type（部分网站用 text/plain 或 JSONP 返回）
+        if not wanted and "json" not in (resp.headers.get("content-type") or ""):
             return
         try:
             body = await resp.body()
-            if len(body) > 2_000_000:
+            if len(body) > 8_000_000:
                 return
-            data = json.loads(body)
+            data = parse_json_body(body.decode("utf-8", errors="replace"))
         except Exception:
             return
         self._json.append({
             "url": resp.url, "method": resp.request.method, "body": resp.request.post_data, "data": data,
         })
+
+    async def _wait_capture(self, timeout_ms: int, quiet_ms: int = 1500) -> None:
+        """等待页面返回匹配 fetch.capture 的接口响应；匹配到后继续等到 quiet_ms 内没有新的匹配响应
+        （一个页面常有多个相关请求，列表数据往往不是第一个返回）。"""
+        assert self.page
+        cfg = self.fetch_config
+
+        def matched() -> int:
+            return sum(
+                1 for r in self._json
+                if re.search(cfg.capture or "", r["url"]) and (not cfg.capture_body or cfg.capture_body in (r.get("body") or ""))
+            )
+
+        waited, quiet, last = 0, 0, 0
+        while waited < timeout_ms:
+            await self.page.wait_for_timeout(250)
+            waited += 250
+            count = matched()
+            if count != last:
+                last, quiet = count, 0
+            elif count:
+                quiet += 250
+                if quiet >= quiet_ms:
+                    return
+
+    async def wait_json_quiet(self, timeout_ms: int = 15_000, quiet_ms: int = 2_000) -> list[dict[str, Any]]:
+        """等到 quiet_ms 内没有新的 JSON 响应（或超时），返回截至目前截获的全部 JSON 响应。"""
+        assert self.page
+        waited, quiet, last = 0, 0, len(self._json)
+        while waited < timeout_ms and quiet < quiet_ms:
+            await self.page.wait_for_timeout(250)
+            waited += 250
+            if len(self._json) != last:
+                last, quiet = len(self._json), 0
+            else:
+                quiet += 250
+        return list(self._json)
 
     async def screenshot(self) -> bytes | None:
         if not self.page:
@@ -145,6 +188,8 @@ class BrowserFetcher:
                 await self.page.wait_for_selector(cfg.wait_for, timeout=timeout)
             except Exception:
                 pass  # 未出现时仍返回页面，由抽取结果体现问题
+        if cfg.capture:
+            await self._wait_capture(timeout)
         if cfg.scroll:
             for _ in range(20):
                 height = await self.page.evaluate("document.body.scrollHeight")
@@ -168,8 +213,10 @@ class BrowserFetcher:
         try:
             if not await button.count() or not await button.is_visible():
                 return None
-            cls = (await button.get_attribute("class") or "").lower()
-            if await button.is_disabled() or "disabled" in cls.split() or "disable" in cls.split() or await button.get_attribute("aria-disabled") == "true":
+            disabled = await button.evaluate(
+                """el => el.disabled === true || !!el.closest('.disabled, .disable, [aria-disabled="true"], [disabled]')"""
+            )
+            if disabled:
                 return None
             self._json = []
             await button.scroll_into_view_if_needed(timeout=timeout)
@@ -185,6 +232,8 @@ class BrowserFetcher:
                 await self.page.wait_for_selector(cfg.wait_for, timeout=timeout)
             except Exception:
                 pass
+        if cfg.capture:
+            await self._wait_capture(timeout)
         await self.page.wait_for_timeout(cfg.wait_ms or 800)
         return Fetched(url=self.page.url, status=200, html=await self.page.content(), json_responses=list(self._json))
 

@@ -27,7 +27,7 @@ from app.ai.prompts import (
     tool_schema,
 )
 from app.ai.providers import LLMError, LLMProvider, Message
-from app.crawler.extractor import PageResult, extract_detail, extract_json, extract_page
+from app.crawler.extractor import PageResult, extract_captured, extract_detail, extract_json, extract_page
 from app.crawler.fetchers import FetchContext, open_fetcher
 from app.crawler.pipeline import jsonable
 from app.crawler.sniff import find_candidates
@@ -69,6 +69,9 @@ async def capture_page(ctx: FetchContext, fetch_mode: str, want_screenshot: bool
     fetch = FetchConfig(mode=fetch_mode, wait_ms=1500 if browser else 0, scroll=browser, timeout=45)  # type: ignore[arg-type]
     async with open_fetcher(ctx, fetch, capture_json=browser) as fetcher:
         fetched = await fetcher.fetch(ctx.start_url)
+        if browser and hasattr(fetcher, "wait_json_quiet"):
+            # 列表接口常常晚于页面加载返回
+            fetched.json_responses = await fetcher.wait_json_quiet()  # type: ignore[attr-defined]
         shot = None
         if browser and want_screenshot and hasattr(fetcher, "screenshot"):
             shot = await fetcher.screenshot()  # type: ignore[attr-defined]
@@ -94,7 +97,10 @@ def _api_page(config: RuleConfig, snapshot: PageSnapshot) -> PageResult | None:
 def evaluate(config: RuleConfig, snapshot: PageSnapshot) -> tuple[list[dict[str, Any]], list[str], bool]:
     """试跑规则并找出问题。返回 (抽取结果, 问题列表, 是否可接受)。"""
     is_api = config.fetch.mode == "api"
-    if is_api:
+    if config.fetch.capture:
+        page = extract_captured(snapshot.json_responses, snapshot.url, config)
+        is_api = True
+    elif is_api:
         api_page = _api_page(config, snapshot)
         if api_page is None:
             return [], [f"fetch.url `{config.fetch.url}` 不在页面捕获到的接口中，请使用捕获列表里的接口地址。"], False

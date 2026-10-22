@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     # 浏览器模式：留空使用 Playwright 默认浏览器
     browser_executable_path: str = ""
     browser_headless: bool = True
+    # 仅在经过会解密 HTTPS 的企业/沙箱代理时开启
+    browser_ignore_https_errors: bool = False
 
     # 定时任务 cron 表达式按此时区解释
     timezone: str = "Asia/Shanghai"

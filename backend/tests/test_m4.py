@@ -182,3 +182,17 @@ async def test_sniff_and_ai_api_mode_with_vision(client, dyn, monkeypatch):
     assert out["ok"] and out["count"] == 2, out
     first = provider.calls[0][0]
     assert "$.data.list[*]" in first.content and first.images and first.images[0][:4] == b"\x89PNG"
+
+
+def test_builtin_templates_are_valid():
+    from app.builtin.templates import BUILTIN_TEMPLATES
+
+    assert {t["key"] for t in BUILTIN_TEMPLATES} >= {"taobao-zichan-search", "allsurplus-search"}
+    for t in BUILTIN_TEMPLATES:
+        cfg = RuleConfig.model_validate(t["config"])
+        assert cfg.fetch.capture and t["example_url"].startswith("https://")
+
+
+async def test_builtin_templates_endpoint(client):
+    r = (await client.get("/api/templates/builtin")).json()
+    assert any(t["key"] == "allsurplus-search" for t in r)

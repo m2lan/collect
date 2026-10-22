@@ -8,6 +8,14 @@ from app.schemas.api import TemplateIn, TemplateOut
 router = APIRouter(prefix="/templates", tags=["templates"])
 
 
+@router.get("/builtin")
+async def builtin_templates() -> list[dict]:
+    """经过真实站点验证的内置平台模板。"""
+    from app.builtin.templates import BUILTIN_TEMPLATES
+
+    return BUILTIN_TEMPLATES
+
+
 @router.get("", response_model=list[TemplateOut])
 async def list_templates(session: SessionDep) -> list[RuleTemplate]:
     return list((await session.scalars(select(RuleTemplate).order_by(RuleTemplate.id.desc()))).all())

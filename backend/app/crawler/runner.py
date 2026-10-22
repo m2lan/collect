@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.crawler.extractor import extract_detail, extract_page, page_urls
+from app.crawler.extractor import extract_captured, extract_detail, extract_page, page_urls
 from app.crawler.fetchers import FetchContext, Fetched, Fetcher, LoginError, open_fetcher
 from app.crawler.fetchers.base import USER_AGENTS
 from app.crawler.health import update_health
@@ -121,10 +121,11 @@ async def crawl(
     key_field = config.list.unique_key or "url"
     item_keys: set[str] = set()
 
-    async with open_fetcher(ctx, fc) as fetcher:
+    async with open_fetcher(ctx, fc, capture_json=bool(fc.capture)) as fetcher:
         clicked: Fetched | None = None  # 点击翻页得到的下一页内容
+        click_started = 0.0
         while (queue or clicked) and result.pages < limit:
-            started = time.monotonic()
+            started = click_started if clicked is not None else time.monotonic()
             if clicked is not None:
                 fetched, url, body, clicked = clicked, clicked.url, None, None
                 source = f"点击「{config.pagination.selector}」"
@@ -138,7 +139,10 @@ async def crawl(
                     await asyncio.sleep(interval)
                 fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body)
                 source = url + (f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else "")
-            page = extract_page(fetched.html, fetched.url, config)
+            if fc.capture:
+                page = extract_captured(fetched.json_responses, fetched.url, config)
+            else:
+                page = extract_page(fetched.html, fetched.url, config)
             result.pages += 1
             new_items = [it for it in page.items if _item_key(it, key_field) not in item_keys]
             item_keys.update(_item_key(it, key_field) for it in page.items)
@@ -171,6 +175,7 @@ async def crawl(
                     break
                 if interval:
                     await asyncio.sleep(interval)
+                click_started = time.monotonic()
                 clicked = await fetcher.click_next(config.pagination.selector or "")  # type: ignore[attr-defined]
                 if clicked is None:
                     runlog.info(f"下一页按钮「{config.pagination.selector}」不存在或已禁用（已是最后一页），停止翻页")

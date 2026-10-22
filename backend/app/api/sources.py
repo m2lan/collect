@@ -289,7 +289,7 @@ async def snapshot(body: SnapshotIn, session: SessionDep) -> dict:
 async def sniff(body: SnapshotIn, session: SessionDep) -> dict:
     """用浏览器打开页面，找出返回拍品列表的 JSON 接口，并给出 api 模式规则草稿。"""
     from app.ai.rule_generator import capture_page
-    from app.crawler.sniff import draft_rule, find_candidates
+    from app.crawler.sniff import can_request_directly, draft_rule, find_candidates
 
     source = await _get_source(session, body.source_id) if body.source_id else None
     ctx = await build_context(session, body, source)
@@ -300,7 +300,12 @@ async def sniff(body: SnapshotIn, session: SessionDep) -> dict:
     except Exception as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"抓取失败: {type(exc).__name__}: {exc}") from exc
     candidates = find_candidates(snap.json_responses)
-    return {
-        "captured": len(snap.json_responses),
-        "candidates": [{**{k: v for k, v in c.items() if k != "score"}, "rule": draft_rule(c)} for c in candidates],
-    }
+    out = []
+    for c in candidates:
+        direct = await can_request_directly(ctx, c)
+        out.append({
+            **{k: v for k, v in c.items() if k != "score"},
+            "mode": "api" if direct else "capture",
+            "rule": draft_rule(c, capture=not direct),
+        })
+    return {"captured": len(snap.json_responses), "candidates": out}
