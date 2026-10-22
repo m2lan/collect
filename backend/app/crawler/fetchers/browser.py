@@ -1,11 +1,15 @@
 import inspect
 import json
+import re
 from urllib.parse import unquote, urlsplit
 from typing import Any
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, Response, async_playwright
 
 from app.config import get_settings
+from app.crawler.extractor import parse_json_body
+from app.crawler.fetchers.pool import pool
+from app.crawler.stealth import LAUNCH_ARGS, STEALTH_JS
 from app.crawler.fetchers.base import FetchContext, Fetched, LoginError
 from app.schemas.rule import FetchConfig
 
@@ -27,18 +31,22 @@ async def _launch(pw: Playwright, proxy: str | None = None) -> Browser:
     return await pw.chromium.launch(
         headless=settings.browser_headless,
         executable_path=settings.browser_executable_path or None,
-        args=["--disable-blink-features=AutomationControlled"],
+        args=LAUNCH_ARGS,
         proxy=_proxy_settings(proxy),  # type: ignore[arg-type]
     )
 
 
-async def _new_context(browser: Browser, ctx: FetchContext) -> BrowserContext:
+async def _new_context(browser: Browser, ctx: FetchContext, viewport: dict[str, int] | None = None) -> BrowserContext:
     context = await browser.new_context(
+        viewport=viewport or {"width": 1366, "height": 900},
         user_agent=ctx.request_headers.get("User-Agent", ctx.user_agent),
         extra_http_headers={k: v for k, v in ctx.headers.items() if k.lower() != "user-agent"},
-        storage_state=ctx.storage_state if ctx.auth_type == "form" else None,
+        storage_state=ctx.storage_state if ctx.uses_storage_state else None,
         locale="zh-CN",
+        ignore_https_errors=get_settings().browser_ignore_https_errors,
     )
+    if ctx.stealth:
+        await context.add_init_script(STEALTH_JS)
     if ctx.auth_type == "cookie":
         cookies = []
         for c in ctx.auth_config.get("cookies", []):
@@ -78,13 +86,11 @@ async def _do_login(page: Page, ctx: FetchContext, timeout_ms: int) -> dict[str,
 
 
 async def login_with_browser(ctx: FetchContext, fetch: FetchConfig) -> dict[str, Any]:
-    async with async_playwright() as pw:
-        browser = await _launch(pw, ctx.proxy)
-        try:
-            context = await _new_context(browser, ctx)
-            return await _do_login(await context.new_page(), ctx, fetch.timeout * 1000)
-        finally:
-            await browser.close()
+    """用浏览器完成表单登录（静态模式也借此拿到会话 Cookie）。旧会话可能已失效，总是重新登录。"""
+    ctx.storage_state = None
+    async with BrowserFetcher(ctx, fetch):  # 没有会话时进入即自动登录
+        assert ctx.storage_state is not None
+        return ctx.storage_state
 
 
 class BrowserFetcher:
@@ -95,13 +101,20 @@ class BrowserFetcher:
         self._json: list[dict[str, Any]] = []
         self._pw_cm = async_playwright()
         self.browser: Browser | None = None
+        self.context: BrowserContext | None = None
         self.page: Page | None = None
+        self._owns_browser = False
 
     async def __aenter__(self) -> "BrowserFetcher":
-        pw = await self._pw_cm.__aenter__()
-        self.browser = await _launch(pw, self.ctx.proxy)
-        context = await _new_context(self.browser, self.ctx)
-        self.page = await context.new_page()
+        if pool.enabled:
+            self.browser = await pool.acquire(self.ctx.proxy, _launch)
+            self._owns_browser = False
+        else:
+            pw = await self._pw_cm.__aenter__()
+            self.browser = await _launch(pw, self.ctx.proxy)
+            self._owns_browser = True
+        self.context = await _new_context(self.browser, self.ctx)
+        self.page = await self.context.new_page()
         if self.capture_json:
             self.page.on("response", self._on_response)
         if self.ctx.auth_type == "form" and not self.ctx.storage_state:
@@ -109,25 +122,71 @@ class BrowserFetcher:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        if self.browser:
-            await self.browser.close()
-        await self._pw_cm.__aexit__(None, None, None)
+        if self.context:
+            try:
+                await self.context.close()
+            except Exception:
+                pass
+        if self._owns_browser:
+            if self.browser:
+                await self.browser.close()
+            await self._pw_cm.__aexit__(None, None, None)
 
     async def _on_response(self, resp: Response) -> None:
-        if resp.request.resource_type not in ("xhr", "fetch"):
+        if resp.request.resource_type not in ("xhr", "fetch", "script"):
             return
-        if "json" not in (resp.headers.get("content-type") or ""):
+        capture = self.fetch_config.capture
+        wanted = bool(capture and re.search(capture, resp.url))
+        # 指定了截获地址时不看 Content-Type（部分网站用 text/plain 或 JSONP 返回）
+        if not wanted and "json" not in (resp.headers.get("content-type") or ""):
             return
         try:
             body = await resp.body()
-            if len(body) > 2_000_000:
+            if len(body) > 8_000_000:
                 return
-            data = json.loads(body)
+            data = parse_json_body(body.decode("utf-8", errors="replace"))
         except Exception:
             return
         self._json.append({
             "url": resp.url, "method": resp.request.method, "body": resp.request.post_data, "data": data,
         })
+
+    async def _wait_capture(self, timeout_ms: int, quiet_ms: int = 1500) -> None:
+        """等待页面返回匹配 fetch.capture 的接口响应；匹配到后继续等到 quiet_ms 内没有新的匹配响应
+        （一个页面常有多个相关请求，列表数据往往不是第一个返回）。"""
+        assert self.page
+        cfg = self.fetch_config
+
+        def matched() -> int:
+            return sum(
+                1 for r in self._json
+                if re.search(cfg.capture or "", r["url"]) and (not cfg.capture_body or cfg.capture_body in (r.get("body") or ""))
+            )
+
+        waited, quiet, last = 0, 0, 0
+        while waited < timeout_ms:
+            await self.page.wait_for_timeout(250)
+            waited += 250
+            count = matched()
+            if count != last:
+                last, quiet = count, 0
+            elif count:
+                quiet += 250
+                if quiet >= quiet_ms:
+                    return
+
+    async def wait_json_quiet(self, timeout_ms: int = 15_000, quiet_ms: int = 2_000) -> list[dict[str, Any]]:
+        """等到 quiet_ms 内没有新的 JSON 响应（或超时），返回截至目前截获的全部 JSON 响应。"""
+        assert self.page
+        waited, quiet, last = 0, 0, len(self._json)
+        while waited < timeout_ms and quiet < quiet_ms:
+            await self.page.wait_for_timeout(250)
+            waited += 250
+            if len(self._json) != last:
+                last, quiet = len(self._json), 0
+            else:
+                quiet += 250
+        return list(self._json)
 
     async def screenshot(self) -> bytes | None:
         if not self.page:
@@ -145,6 +204,8 @@ class BrowserFetcher:
                 await self.page.wait_for_selector(cfg.wait_for, timeout=timeout)
             except Exception:
                 pass  # 未出现时仍返回页面，由抽取结果体现问题
+        if cfg.capture:
+            await self._wait_capture(timeout)
         if cfg.scroll:
             for _ in range(20):
                 height = await self.page.evaluate("document.body.scrollHeight")
@@ -159,12 +220,48 @@ class BrowserFetcher:
             json_responses=list(self._json),
         )
 
+    async def click_next(self, selector: str) -> Fetched | None:
+        """点击"下一页"按钮（适用于没有真实链接、由 JS 翻页的网站），返回翻页后的页面；按钮不存在或不可用时返回 None。"""
+        assert self.page
+        cfg = self.fetch_config
+        timeout = cfg.timeout * 1000
+        button = self.page.locator(selector).first
+        try:
+            if not await button.count() or not await button.is_visible():
+                return None
+            disabled = await button.evaluate(
+                """el => el.disabled === true || !!el.closest('.disabled, .disable, [aria-disabled="true"], [disabled]')"""
+            )
+            if disabled:
+                return None
+            self._json = []
+            await button.scroll_into_view_if_needed(timeout=timeout)
+            await button.click(timeout=timeout)
+        except Exception:
+            return None
+        if cfg.capture:
+            # 截获模式只需等目标接口返回；有长连接的网站永远不会 networkidle
+            await self._wait_capture(timeout)
+        else:
+            try:
+                await self.page.wait_for_load_state("networkidle", timeout=min(timeout, 10_000))
+            except Exception:
+                pass
+            if cfg.wait_for:
+                try:
+                    await self.page.wait_for_selector(cfg.wait_for, timeout=timeout)
+                except Exception:
+                    pass
+        await self.page.wait_for_timeout(cfg.wait_ms or 800)
+        return Fetched(url=self.page.url, status=200, html=await self.page.content(), json_responses=list(self._json))
+
     async def fetch(self, url: str, method: str = "GET", body: dict[str, Any] | None = None) -> Fetched:
         fetched = await self._load(url)
         if self.ctx.needs_login(fetched):
             assert self.page
             await _do_login(self.page, self.ctx, self.fetch_config.timeout * 1000)
             fetched = await self._load(url)
+        self.ctx.check_session(fetched)
         if fetched.status >= 400:
             raise RuntimeError(f"HTTP {fetched.status}: {url}")
         return fetched

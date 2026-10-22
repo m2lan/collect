@@ -40,7 +40,7 @@ class StaticFetcher:
     def _cookies(self) -> httpx.Cookies:
         if self.ctx.auth_type == "cookie":
             return _cookie_jar(self.ctx.auth_config.get("cookies", []))
-        if self.ctx.storage_state:
+        if self.ctx.uses_storage_state and self.ctx.storage_state:
             return _cookie_jar(self.ctx.storage_state.get("cookies", []))
         return httpx.Cookies()
 
@@ -65,5 +65,6 @@ class StaticFetcher:
             self.client.cookies = self._cookies()
             resp = await self._request(url, method, body)
             fetched = Fetched(url=str(resp.url), status=resp.status_code, html=resp.text)
+        self.ctx.check_session(fetched)
         resp.raise_for_status()
         return fetched

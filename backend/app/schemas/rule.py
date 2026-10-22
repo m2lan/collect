@@ -25,6 +25,12 @@ class FetchConfig(BaseModel):
     url: str | None = Field(None, description="api 模式：接口地址（为空则用站点链接）")
     method: Literal["GET", "POST"] = "GET"
     body: dict[str, Any] | None = Field(None, description="api 模式 POST 的 JSON 请求体")
+    capture: str | None = Field(
+        None,
+        description="浏览器模式下截获页面自身发出的接口：接口 URL 需匹配的正则（如 search/list）。"
+        "适用于接口带签名/令牌、无法直接请求的网站，配合 jsonpath 抽取",
+    )
+    capture_body: str | None = Field(None, description="截获接口时请求体还需包含的文本（区分同一地址的不同请求）")
     wait_for: str | None = Field(None, description="浏览器模式下等待出现的 CSS 选择器")
     wait_ms: int = Field(0, ge=0, le=60_000, description="页面加载后额外等待的毫秒数")
     scroll: bool = Field(False, description="是否滚动到底部以触发懒加载")
@@ -35,12 +41,16 @@ class Transform(BaseModel):
     name: str
     pattern: str | None = None  # 仅 regex_replace 使用
     repl: str = ""
+    mapping: dict[str, str] | None = Field(None, description="map：原值 → 新值，未命中保持原值")
 
     @model_validator(mode="after")
     def _check(self) -> "Transform":
         if self.name == "regex_replace":
             if not self.pattern:
                 raise ValueError("regex_replace 需要 pattern")
+        elif self.name == "map":
+            if not self.mapping:
+                raise ValueError("map 需要 mapping")
         elif self.name not in TRANSFORMS:
             raise ValueError(f"不支持的 transform: {self.name}")
         return self
@@ -48,8 +58,10 @@ class Transform(BaseModel):
 
 class FieldRule(BaseModel):
     key: str = Field(min_length=1, max_length=64)
-    type: Literal["css", "xpath", "regex", "jsonpath"] = "css"
-    selector: str = Field("", description="相对拍品容器的选择器；为空表示容器本身")
+    type: Literal["css", "xpath", "regex", "jsonpath", "template"] = "css"
+    selector: str = Field(
+        "", description="相对拍品容器的选择器；为空表示容器本身。template 类型为含 {jsonpath} 占位符的模板，如 {price}{priceUnit}"
+    )
     attr: str = Field("text", description="text / html / 任意属性名，如 href、src、data-end")
     pattern: str | None = Field(None, description="regex 类型：带一个捕获组的正则")
     from_: str | None = Field(None, alias="from", description="regex 类型：从已抽取的字段取值，为空则用容器文本")
@@ -83,8 +95,8 @@ class ListRule(BaseModel):
 
 
 class Pagination(BaseModel):
-    type: Literal["none", "next_link", "url_template", "page_param"] = "none"
-    selector: str | None = Field(None, description="next_link：下一页链接的 CSS 选择器")
+    type: Literal["none", "next_link", "url_template", "page_param", "click"] = "none"
+    selector: str | None = Field(None, description="next_link：下一页链接的 CSS 选择器；click：下一页按钮的 CSS 选择器（浏览器模式）")
     template: str | None = Field(None, description="url_template：含 {page} 占位符的 URL")
     param: str | None = Field(None, description="page_param：页码参数名（GET 为查询参数，POST 为请求体字段）")
     start: int = 1
@@ -92,8 +104,8 @@ class Pagination(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "Pagination":
-        if self.type == "next_link" and not self.selector:
-            raise ValueError("next_link 翻页需要 selector")
+        if self.type in ("next_link", "click") and not self.selector:
+            raise ValueError(f"{self.type} 翻页需要 selector")
         if self.type == "url_template" and (not self.template or "{page}" not in self.template):
             raise ValueError("url_template 翻页需要包含 {page} 的 template")
         if self.type == "page_param" and not self.param:
@@ -120,15 +132,22 @@ class RuleConfig(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "RuleConfig":
         is_json = self.list.item_selector_type == "jsonpath"
-        if is_json != (self.fetch.mode == "api"):
-            raise ValueError("api 模式需要 item_selector_type=jsonpath，反之亦然")
+        capture = bool(self.fetch.capture)
+        if capture and self.fetch.mode != "browser":
+            raise ValueError("截获接口（fetch.capture）需要 fetch.mode=browser")
+        if is_json != (self.fetch.mode == "api" or capture):
+            raise ValueError("api 模式或截获接口时需要 item_selector_type=jsonpath，反之 jsonpath 只能用于这两种情况")
         for f in self.list.fields:
-            if is_json and f.type not in ("jsonpath", "regex"):
-                raise ValueError(f"api 模式下字段 {f.key} 需使用 jsonpath 或 regex")
-            if not is_json and f.type == "jsonpath":
-                raise ValueError(f"字段 {f.key}: jsonpath 仅用于 api 模式")
-        if self.pagination.type == "next_link" and is_json:
-            raise ValueError("api 模式不支持 next_link 翻页，请使用 url_template 或 page_param")
-        if self.detail.enabled and any(f.type == "jsonpath" for f in self.detail.fields):
-            raise ValueError("详情页字段不支持 jsonpath")
+            if is_json and f.type not in ("jsonpath", "regex", "template"):
+                raise ValueError(f"接口数据的字段 {f.key} 需使用 jsonpath、template 或 regex")
+            if not is_json and f.type in ("jsonpath", "template"):
+                raise ValueError(f"字段 {f.key}: {f.type} 仅用于接口数据")
+        if self.fetch.mode == "api" and self.pagination.type in ("next_link", "click"):
+            raise ValueError("api 模式不支持 next_link / click 翻页，请使用 url_template 或 page_param")
+        if capture and self.pagination.type == "next_link":
+            raise ValueError("截获接口时没有可解析的 HTML 链接，翻页请使用 click、url_template 或 page_param")
+        if self.pagination.type == "click" and self.fetch.mode == "static":
+            raise ValueError("click 翻页需要浏览器模式（fetch.mode 为 browser 或留空并在站点中选择浏览器渲染）")
+        if self.detail.enabled and any(f.type in ("jsonpath", "template") for f in self.detail.fields):
+            raise ValueError("详情页字段不支持 jsonpath / template")
         return self

@@ -11,18 +11,22 @@ DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 )
+# 只用 Chromium 内核的 UA：浏览器模式下用 Chromium 冒充 Firefox / Safari 会造成指纹矛盾，反而更容易被风控
 USER_AGENTS = [
     DEFAULT_UA,
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36 Edg/139.0.0.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
 ]
 
 
 class LoginError(Exception):
     pass
+
+
+class LoginExpired(LoginError):
+    """Cookie / 人工登录的会话已失效，需要管理员重新登录（无法自动恢复）。"""
 
 
 @dataclass
@@ -49,25 +53,41 @@ class FetchContext:
     # 代理地址，如 http://user:pass@1.2.3.4:8080 或 socks5://1.2.3.4:1080
     proxy: str | None = None
     user_agent: str = DEFAULT_UA
+    stealth: bool = True
+    # 按域名限速的最小间隔（秒），0 表示不限
+    domain_interval: float = 0.0
 
     @property
     def request_headers(self) -> dict[str, str]:
         has_ua = any(k.lower() == "user-agent" for k in self.headers)
         return self.headers if has_ua else {"User-Agent": self.user_agent, **self.headers}
 
-    def needs_login(self, fetched: Fetched) -> bool:
-        if self.auth_type != "form":
-            return False
+    @property
+    def uses_storage_state(self) -> bool:
+        return self.auth_type in ("form", "session")
+
+    def _logged_out(self, fetched: Fetched) -> bool:
+        """跳转到了登录页，或页面上没有“已登录标志”元素。"""
         cfg = self.auth_config
         login_url = cfg.get("login_url") or ""
         if login_url and fetched.url.split("?")[0] == login_url.split("?")[0]:
             return True
         marker = cfg.get("logged_in_selector")
-        if marker:
+        if marker and fetched.html.lstrip()[:1] == "<":
             from parsel import Selector
 
             return not Selector(text=fetched.html).css(marker)
         return False
+
+    def needs_login(self, fetched: Fetched) -> bool:
+        """表单登录：会话失效时自动重新登录。"""
+        return self.auth_type == "form" and self._logged_out(fetched)
+
+    def check_session(self, fetched: Fetched) -> None:
+        """Cookie / 人工登录：会话失效无法自动恢复，抛出 LoginExpired 以便提醒管理员。"""
+        if self.auth_type in ("cookie", "session") and self._logged_out(fetched):
+            how = "重新粘贴 Cookie" if self.auth_type == "cookie" else "在站点管理中使用“远程登录”重新登录"
+            raise LoginExpired(f"登录已失效（{fetched.url}），请{how}")
 
 
 class Fetcher(Protocol):

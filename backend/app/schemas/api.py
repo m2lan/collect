@@ -40,10 +40,11 @@ class AuthOut(BaseModel):
     submit_selector: str | None = None
     logged_in_selector: str | None = None
     has_session: bool = False
+    session_saved_at: str | None = None
 
 
 FetchMode = Literal["static", "browser"]
-AuthType = Literal["none", "cookie", "form"]
+AuthType = Literal["none", "cookie", "form", "session"]
 
 
 class SourceBase(BaseModel):
@@ -56,6 +57,7 @@ class SourceBase(BaseModel):
     enabled: bool = True
     allow_ai_repair: bool = True
     use_proxy: bool = False
+    ending_boost: bool = False
 
 
 class SourceIn(SourceBase):
@@ -72,6 +74,7 @@ class SourceOut(SourceBase):
     lot_count: int = 0
     health: str = "ok"
     health_message: str | None = None
+    login_expired_at: datetime | None = None
     last_run: "RunOut | None" = None
     created_at: datetime
 
@@ -126,6 +129,8 @@ class RunOut(BaseModel):
     items_new: int
     items_updated: int
     error: str | None
+    error_type: str | None = None
+    duration_ms: int | None = None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -179,6 +184,7 @@ class LotOut(BaseModel):
     start_time: datetime | None
     end_time: datetime | None
     extra: dict[str, Any]
+    tags: dict[str, Any] = Field(default_factory=dict)
     first_seen_at: datetime
     last_seen_at: datetime
 
@@ -208,6 +214,7 @@ class AISettings(BaseModel):
     enabled: bool = False
     daily_limit: int = Field(100, ge=0)
     auto_repair: bool = False
+    auto_tag: bool = False
     max_rounds: int = Field(3, ge=1, le=6)
 
 
@@ -220,6 +227,10 @@ class AlertSettings(BaseModel):
 class CrawlerSettings(BaseModel):
     proxies: list[str] = Field(default_factory=list, description="代理地址列表，如 http://user:pass@host:port")
     random_ua: bool = True
+    stealth: bool = True
+    domain_interval: float = Field(1.0, ge=0, le=60)
+    boost_window_minutes: int = Field(30, ge=1, le=1440)
+    boost_interval_minutes: float = Field(1, ge=0.5, le=60)
 
 
 class TemplateIn(BaseModel):
@@ -283,6 +294,7 @@ class GenerateIn(BaseModel):
     hint: str | None = Field(None, max_length=2000)
     provider_id: int | None = None
     apply: bool = False
+    analyze_detail: bool = Field(False, description="同时打开详情页生成详情字段规则（AI 判断列表页缺少所需字段时也会自动进行）")
 
 
 class GenerateOut(BaseModel):
@@ -298,6 +310,7 @@ class GenerateOut(BaseModel):
     completion_tokens: int
     duration_ms: int
     rule_version: int | None = None
+    missing_fields: list[str] = Field(default_factory=list)
 
 
 class GenerationOut(BaseModel):
@@ -315,6 +328,47 @@ class GenerationOut(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     duration_ms: int
+    error: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+SubscriptionEvent = Literal["new", "price_change", "price_reach", "ending_soon"]
+
+
+class SubscriptionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    enabled: bool = True
+    keywords: list[str] = Field(default_factory=list)
+    exclude_keywords: list[str] = Field(default_factory=list)
+    source_ids: list[int] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    min_price: Decimal | None = None
+    max_price: Decimal | None = None
+    events: list[SubscriptionEvent] = Field(min_length=1)
+    target_price: Decimal | None = None
+    ending_minutes: int = Field(30, ge=1, le=1440)
+    webhook_type: Literal["generic", "wecom", "dingtalk", "feishu"] | None = None
+    webhook_url: str | None = None
+
+
+class SubscriptionOut(SubscriptionIn):
+    id: int
+    created_at: datetime
+    notified: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class NotificationOut(BaseModel):
+    id: int
+    subscription_id: int
+    subscription_name: str | None = None
+    lot_id: int
+    event: str
+    message: str
+    sent: bool
     error: str | None
     created_at: datetime
 

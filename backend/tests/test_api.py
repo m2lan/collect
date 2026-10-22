@@ -28,9 +28,13 @@ def server():
     srv.shutdown()
 
 
+_servers: dict = {}
+
+
 @pytest.fixture
 def login_server():
     srv, base = site.start(require_login=True)
+    _servers["login"] = srv
     yield base
     srv.shutdown()
 

@@ -78,6 +78,7 @@ async def run_generation(
     provider_id: int | None = None,
     trigger: str = "manual",
     previous_rule: dict[str, Any] | None = None,
+    analyze_detail: bool = False,
 ) -> tuple[AIGeneration, GenerationResult]:
     row, provider = await resolve_provider(session, provider_id)
     gen = AIGeneration(
@@ -88,7 +89,9 @@ async def run_generation(
 
     max_rounds = int(await get_setting(session, "ai.max_rounds") or 3)
     try:
-        result = await generate_rule(provider, ctx, fetch_mode, hint, max_rounds, previous_rule=previous_rule)
+        result = await generate_rule(
+            provider, ctx, fetch_mode, hint, max_rounds, previous_rule=previous_rule, analyze_detail=analyze_detail
+        )
     except (LLMError, LoginError) as exc:
         gen.status, gen.error = "failed", str(exc)[:4000]
         await session.commit()

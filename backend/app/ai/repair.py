@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.ai import service
-from app.crawler.runner import context_for
+from app.crawler.runner import apply_network, context_for
 from app.db import SessionLocal
 from app.models import Rule, Source
 from app.notify import notify
@@ -27,11 +27,12 @@ async def auto_repair(source_id: int) -> int | None:
             log.info("auto repair skipped: %s", exc.detail)
             return None
         old = await session.scalar(select(Rule).where(Rule.source_id == source_id, Rule.is_active))
-        ctx = context_for(source)
+        ctx = await apply_network(session, context_for(source), source.use_proxy)
         mode = ((old.config.get("fetch") or {}).get("mode") if old else None) or source.fetch_mode
         try:
             gen, result = await service.run_generation(
-                session, ctx, mode, source_id=source_id, trigger="repair", previous_rule=old.config if old else None
+                session, ctx, mode, source_id=source_id, trigger="repair", previous_rule=old.config if old else None,
+                analyze_detail=bool(old and (old.config.get("detail") or {}).get("enabled")),
             )
         except HTTPException as exc:
             await notify(session, f"AI 自动修复失败：{source.name}", str(exc.detail))

@@ -67,6 +67,8 @@ def _collapse(root: etree._Element) -> None:
                 parent.remove(extra)
             idx = list(parent).index(last_kept)
             label = same[0].tag + "".join(f".{c}" for c in (same[0].get("class") or "").split())
+            # HTML 注释中不能出现 "--"（BEM 风格的 class 如 item--active 很常见）
+            label = re.sub(r"-{2,}", "-", label).rstrip("-")
             comment = etree.Comment(f" 另有 {n - SAMPLES} 个相同结构的 <{label}> 元素已省略 ")
             comment.tail = last_kept.tail
             last_kept.tail = None

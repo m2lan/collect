@@ -259,3 +259,9 @@ async def test_other_400_errors_are_not_swallowed():
     p = build_provider(cfg, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     with pytest.raises(Exception, match="Invalid API key"):
         await p.generate_structured("sys", [Message("user", "hi")], SCHEMA, "report", "d")
+
+
+def test_compress_html_bem_classes():
+    items = "".join(f'<li class="card card--featured"><b>{i}</b></li>' for i in range(10))
+    out = compress_html(f"<html><body><ul>{items}</ul></body></html>")
+    assert "另有 7 个" in out and "--" not in out.split("另有")[1].split("-->")[0]

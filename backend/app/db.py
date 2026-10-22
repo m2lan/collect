@@ -1,3 +1,4 @@
+import json
 from collections.abc import AsyncIterator
 
 from datetime import UTC, datetime
@@ -35,7 +36,12 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
+def _json_dumps(value: object) -> str:
+    # 保留中文原文（默认会转义为 \uXXXX），扩展信息与标签才能被 LIKE 搜索
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+engine = create_async_engine(get_settings().database_url, pool_pre_ping=True, json_serializer=_json_dumps)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 

@@ -26,6 +26,20 @@ fetch('/api/lots?page=1').then(r => r.json()).then(d => {
     `<div class="card"><a href="${x.detailUrl}">${x.lotName}</a><b>${x.currentPrice}</b></div>`).join('');
 });
 </script></body></html>"""
+JS_LIST_PAGE = """<html><body><div id="list"></div>
+<div class="pager"><button class="next-btn" type="button">下一页</button></div>
+<script>
+let page = 1;
+function load() {
+  fetch('/api/lots?page=' + page).then(r => r.json()).then(d => {
+    document.getElementById('list').innerHTML = d.data.list.map(x =>
+      `<div class="lot"><a class="name" href="${x.detailUrl}">${x.lotName}</a><span class="cur">¥${x.currentPrice}</span></div>`).join('');
+    document.querySelector('.next-btn').disabled = page * 2 >= d.data.total;
+  });
+}
+document.querySelector('.next-btn').addEventListener('click', () => { page += 1; load(); });
+load();
+</script></body></html>"""
 DETAIL_PAGE = """<html><body><h1 class="lot-title">{title}</h1>
 <div class="price-box">当前价 <span class="now">¥{price}</span></div>
 <div class="estimate">估价：RMB 80,000-120,000</div><div class="deposit">保证金 ¥5,000</div></body></html>"""
@@ -68,6 +82,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(lots_page(int(parse_qs(url.query).get("page", ["1"])[0])))
         if url.path == "/spa":
             return self._send(SPA_PAGE)
+        if url.path == "/jslist":
+            return self._send(JS_LIST_PAGE)
         if url.path.startswith("/lot/"):
             lot = next((x for x in LOTS if f"/lot/{x['id']}" == url.path), None)
             if lot is None:
@@ -80,7 +96,8 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/login":
             return self._send(LOGIN_PAGE)
         if url.path == "/list":
-            if self.server.require_login and "sid=ok" not in (self.headers.get("Cookie") or ""):
+            sid = getattr(self.server, "valid_sid", "ok")
+            if self.server.require_login and f"sid={sid}" not in (self.headers.get("Cookie") or ""):
                 return self._send("", 302, {"Location": "/login"})
             page = parse_qs(url.query).get("page", ["1"])[0]
             html = fixture_html(f"list_page{page}.html").replace("<body>", '<body><div id="user">我的</div>', 1)
@@ -100,7 +117,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(lots_page(int(body.get("pageNo", 1)), int(body.get("pageSize", 2))))
         form = parse_qs(raw)
         if form.get("u") == ["alice"] and form.get("p") == ["secret"]:
-            return self._send("", 302, {"Location": "/list", "Set-Cookie": "sid=ok; Path=/"})
+            sid = getattr(self.server, "valid_sid", "ok")
+            return self._send("", 302, {"Location": "/list", "Set-Cookie": f"sid={sid}; Path=/"})
         self._send(LOGIN_PAGE, 401)
 
 

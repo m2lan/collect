@@ -5,16 +5,17 @@ Redis 模式下作为独立进程运行（`python -m app.scheduler`）；未配�
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import CrawlRun, Rule, Schedule, Source
+from app.models import CrawlRun, Lot, Rule, Schedule, Source
 from app.models.entities import utcnow
+from app.settings_store import get_setting
 from app.tasks import enqueue_crawl
 
 log = logging.getLogger(__name__)
@@ -67,15 +68,58 @@ async def tick() -> int:
     return len(created)
 
 
+async def boost_tick() -> int:
+    """临近结束加密盯价：开启了 ending_boost 的站点有拍品即将结束时，按设定间隔创建只刷新这些拍品的任务。"""
+    now = utcnow()
+    created: list[int] = []
+    async with SessionLocal() as session:
+        window = int(await get_setting(session, "live.boost_window_minutes") or 30)
+        every = float(await get_setting(session, "live.boost_interval_minutes") or 1)
+        sources = (await session.scalars(select(Source).where(Source.enabled, Source.ending_boost))).all()
+        for source in sources:
+            ending = await session.scalar(
+                select(Lot.id).where(
+                    Lot.source_id == source.id, Lot.status == "live",
+                    Lot.end_time > now, Lot.end_time <= now + timedelta(minutes=window),
+                ).limit(1)
+            )
+            if not ending or not await session.scalar(select(Rule.id).where(Rule.source_id == source.id, Rule.is_active)):
+                continue
+            busy = await session.scalar(
+                select(CrawlRun.id).where(CrawlRun.source_id == source.id, CrawlRun.status.in_(["pending", "running"]))
+            )
+            last = await session.scalar(
+                select(func.max(CrawlRun.created_at)).where(CrawlRun.source_id == source.id, CrawlRun.kind == "ending")
+            )
+            if busy or (last and _aware(last) > now - timedelta(minutes=every) + timedelta(seconds=5)):
+                continue
+            run = CrawlRun(source_id=source.id, trigger="boost", kind="ending", status="pending")
+            session.add(run)
+            await session.flush()
+            created.append(run.id)
+        await session.commit()
+    for run_id in created:
+        await enqueue_crawl(run_id)
+    return len(created)
+
+
+async def ending_notice_tick() -> int:
+    from app.subscriptions import check_ending_soon
+
+    async with SessionLocal() as session:
+        return await check_ending_soon(session)
+
+
 async def run_scheduler(interval: float = 15) -> None:
     log.info("scheduler started")
     while True:
-        try:
-            n = await tick()
-            if n:
-                log.info("scheduler created %d runs", n)
-        except Exception:
-            log.exception("scheduler tick failed")
+        for name, job in (("schedule", tick), ("boost", boost_tick), ("ending notice", ending_notice_tick)):
+            try:
+                n = await job()
+                if n:
+                    log.info("scheduler %s: %d", name, n)
+            except Exception:
+                log.exception("scheduler %s tick failed", name)
         await asyncio.sleep(interval)
 
 

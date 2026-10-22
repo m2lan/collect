@@ -35,10 +35,30 @@
           <el-form-item label="登录方式">
             <el-radio-group v-model="form.auth_type">
               <el-radio value="none">无需登录</el-radio>
+              <el-radio value="session">人工登录（扫码 / 验证码）</el-radio>
               <el-radio value="cookie">粘贴 Cookie</el-radio>
               <el-radio value="form">账号密码自动登录</el-radio>
             </el-radio-group>
           </el-form-item>
+          <template v-if="form.auth_type === 'session'">
+            <el-form-item label="登录会话">
+              <div>
+                <el-tag v-if="source?.auth?.has_session" disable-transitions type="success">已保存（{{ fmtTime(source.auth.session_saved_at) }}）</el-tag>
+                <el-tag v-else disable-transitions type="info">尚未登录</el-tag>
+                <el-button type="primary" plain style="margin-left: 8px" @click="openRemote">打开远程浏览器登录</el-button>
+              </div>
+              <div class="muted">在服务器上的真实浏览器中完成扫码、验证码、短信登录或 Cloudflare 等人机验证，然后保存登录状态。</div>
+            </el-form-item>
+          </template>
+          <template v-if="form.auth_type === 'cookie' || form.auth_type === 'session'">
+            <el-form-item label="已登录标志选择器">
+              <el-input v-model="form.auth.logged_in_selector" placeholder=".user-name（只有登录后才出现的元素，用于检测登录是否失效）" />
+            </el-form-item>
+            <el-form-item label="登录页 URL">
+              <el-input v-model="form.auth.login_url" placeholder="可选：被跳转到此页面即视为登录失效；远程登录时也会直接打开它" />
+              <div class="muted">设置后，采集时若检测到登录失效会停止并通过告警通知提醒你重新登录。</div>
+            </el-form-item>
+          </template>
           <template v-if="form.auth_type === 'cookie'">
             <el-form-item label="Cookie">
               <el-input v-model="form.auth.cookies" type="textarea" :rows="5" class="mono"
@@ -70,7 +90,10 @@
 
       <el-tab-pane label="采集规则" name="rule">
         <div v-if="aiAvailable" class="ai-bar">
-          <el-input v-model="aiHint" placeholder="给 AI 的补充要求（可选），如：还要抓保证金和围观人数" clearable />
+          <el-input v-model="aiHint" placeholder="给 AI 的补充要求（可选），如：还要抓保证金和评估价" clearable />
+          <el-tooltip content="保证金、评估价、拍品描述等通常只在详情页。勾选后 AI 会打开详情页生成详情字段规则；AI 发现列表页缺少你要求的字段时也会自动分析详情页" placement="top">
+            <el-checkbox v-model="aiDetail" border>同时分析详情页</el-checkbox>
+          </el-tooltip>
           <el-button type="warning" :loading="generating" @click="runAI">AI 生成规则</el-button>
         </div>
         <el-alert v-if="generating" type="info" :closable="false" style="margin-bottom: 8px"
@@ -78,6 +101,9 @@
         <el-alert v-if="aiResult" :type="aiResult.ok ? 'success' : 'warning'" :closable="false" style="margin-bottom: 8px"
           :title="aiResult.ok ? `AI 已生成规则（${aiResult.rounds} 轮，抽取到 ${aiResult.count} 条），保存后生效` : 'AI 未能生成完全可用的规则，以下是最佳结果，请检查后调整'">
           <div style="white-space: pre-wrap">{{ aiResult.explanation }}</div>
+          <div v-if="aiResult.rule?.detail?.enabled" style="margin-top: 4px">
+            已生成详情页规则：{{ aiResult.rule.detail.fields.map((f) => f.key).join('、') }}（每次采集打开新拍品的详情页补充这些字段）
+          </div>
           <ul v-if="aiResult.problems.length" style="margin: 4px 0 0; padding-left: 18px">
             <li v-for="p in aiResult.problems" :key="p">{{ p }}</li>
           </ul>
@@ -89,7 +115,8 @@
             <el-button>模板<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item v-for="t in templates" :key="t.id" :command="t">从模板导入：{{ t.name }}</el-dropdown-item>
+                <el-dropdown-item v-for="t in builtin" :key="t.key" :command="t">内置模板：{{ t.name }}</el-dropdown-item>
+                <el-dropdown-item v-for="t in templates" :key="t.id" :command="t" :divided="t === templates[0] && builtin.length > 0">从模板导入：{{ t.name }}</el-dropdown-item>
                 <el-dropdown-item v-if="!templates.length" disabled>暂无模板</el-dropdown-item>
                 <el-dropdown-item command="save" divided>将当前规则保存为模板</el-dropdown-item>
               </el-dropdown-menu>
@@ -108,7 +135,8 @@
               <p><b>fields[]</b>：key 为字段名；标准字段 title / url / image / current_price / start_price / deal_price / bid_count / status / start_time / end_time 会进入对应列，其余字段进入"扩展信息"。</p>
               <p>type：css / xpath / regex；selector 相对拍品容器，留空表示容器本身；attr：text / html / 属性名（href、src、data-*）。</p>
               <p>transform：trim、price（解析金额与币种，支持"万"）、number、int、datetime、absolute_url、status（进行中/已成交/流拍…）、lower，或 {"name":"regex_replace","pattern":"..","repl":".."}。</p>
-              <p><b>unique_key</b>：用于去重的字段，默认 url。<b>pagination</b>：none / next_link（selector）/ url_template（template 含 {page}）。</p>
+              <p><b>unique_key</b>：用于去重的字段，默认 url。</p>
+              <p><b>pagination</b>：none / next_link（"下一页"链接的 selector）/ url_template（template 含 {page}）/ click（"下一页"按钮的 selector，适用于点击后由 JS 加载的网站，需浏览器渲染）。无限滚动加载用 fetch.scroll=true。</p>
               <p><b>fetch</b>：浏览器模式下可设置 wait_for（等待元素）、scroll（滚动加载）、wait_ms。</p>
               <p><b>接口模式</b>：fetch.mode 设为 api，fetch.url / method / body 指定接口；item_selector_type 为 jsonpath（如 $.data.list[*]），字段 type 为 jsonpath（如 $.title）；翻页用 url_template 或 page_param（param 为页码参数名）。推荐用"嗅探接口"自动生成。</p>
               <p><b>detail</b>：{"enabled": true, "url_field": "url", "fields": [...], "max_items": 50, "only_new": true} 打开每个拍品的详情页补充字段（选择器相对整个详情页），详情页的值优先；盯价任务也通过详情页刷新价格。</p>
@@ -137,6 +165,10 @@
             <div v-if="schedules.full.next_run_at" class="muted">下次执行：{{ fmtTime(schedules.full.next_run_at) }}</div>
           </el-form-item>
           <el-divider />
+          <el-form-item label="临近结束加密盯价">
+            <el-switch v-model="form.ending_boost" />
+            <span class="muted" style="margin-left: 12px">有拍品即将结束时自动提高刷新频率（窗口和间隔在系统设置中配置）</span>
+          </el-form-item>
           <el-form-item label="盯价">
             <el-switch v-model="schedules.live.enabled" />
             <span class="muted" style="margin-left: 12px">只刷新"进行中"的拍品价格；规则配置了详情页时逐个抓取详情页，否则重新抓取列表页</span>
@@ -175,6 +207,7 @@
 
   <VisualPicker v-model="pickerVisible" :request="pickerRequest" :base-rule="pickerBase" @done="onPicked" />
   <SniffDialog v-model="sniffVisible" :request="pickerRequest" @done="onPicked" />
+  <RemoteBrowser v-model="remoteVisible" :source="source" @saved="emit('saved')" />
 </template>
 
 <script setup>
@@ -182,12 +215,13 @@ import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   activateRule, aiGenerate, clearSession, createSource, createTemplate, getAISettings, listRules, listSchedules,
-  listTemplates, preview, saveSchedules, updateSource,
+  listTemplates, preview, saveSchedules, updateSource, builtinTemplates,
 } from '../api'
 import { fmtTime } from '../format'
 import CronInput from './CronInput.vue'
 import VisualPicker from './VisualPicker.vue'
 import SniffDialog from './SniffDialog.vue'
+import RemoteBrowser from './RemoteBrowser.vue'
 import { ArrowDown } from '@element-plus/icons-vue'
 
 const props = defineProps({ modelValue: Boolean, source: Object, aiDraft: Object })
@@ -226,6 +260,7 @@ const previewing = ref(false)
 const previewResult = ref(null)
 const aiAvailable = ref(false)
 const aiHint = ref('')
+const aiDetail = ref(false)
 const generating = ref(false)
 const aiResult = ref(null)
 const generatedText = ref(null)
@@ -234,7 +269,20 @@ const pickerVisible = ref(false)
 const pickerRequest = ref(null)
 const pickerBase = ref(null)
 const sniffVisible = ref(false)
+const remoteVisible = ref(false)
+
+async function openRemote() {
+  if (!props.source) {
+    return ElMessage.warning('请先保存站点，再打开远程浏览器登录')
+  }
+  if (props.source.auth_type !== form.value.auth_type) {
+    // 先保存登录方式，远程登录保存的会话才会被采集使用
+    await updateSource(props.source.id, payload())
+  }
+  remoteVisible.value = true
+}
 const templates = ref([])
+const builtin = ref([])
 const emptySchedules = () => ({
   full: { kind: 'full', enabled: false, cron: '0 */2 * * *', next_run_at: null },
   live: { kind: 'live', enabled: false, cron: '*/5 * * * *', next_run_at: null },
@@ -265,6 +313,7 @@ async function init() {
     enabled: s?.enabled ?? true,
     allow_ai_repair: s?.allow_ai_repair ?? true,
     use_proxy: s?.use_proxy ?? false,
+    ending_boost: s?.ending_boost ?? false,
     auth_type: s?.auth_type || 'none',
     auth: { ...emptyAuth(), ...pickAuth(s?.auth) },
   }
@@ -286,7 +335,7 @@ async function init() {
   }
   rules.value = s ? await listRules(s.id) : []
   aiAvailable.value = (await getAISettings()).available
-  templates.value = await listTemplates()
+  ;[templates.value, builtin.value] = await Promise.all([listTemplates(), builtinTemplates()])
 }
 
 function pickAuth(a) {
@@ -332,7 +381,7 @@ async function runAI() {
   generating.value = true
   aiResult.value = null
   try {
-    applyAIResult(await aiGenerate({ ...body, hint: aiHint.value || null, source_id: props.source?.id }))
+    applyAIResult(await aiGenerate({ ...body, hint: aiHint.value || null, source_id: props.source?.id, analyze_detail: aiDetail.value }))
   } finally {
     generating.value = false
   }
@@ -432,5 +481,5 @@ async function logout() {
 
 <style scoped>
 .help p { margin: 4px 0; }
-.ai-bar { display: flex; gap: 8px; margin-bottom: 8px; }
+.ai-bar { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 </style>

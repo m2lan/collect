@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import random
 import time
@@ -10,16 +11,21 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.crawler.extractor import extract_detail, extract_page, page_urls
+from app.crawler.extractor import extract_captured, extract_detail, extract_page, page_urls
 from app.crawler.fetchers import FetchContext, Fetched, Fetcher, LoginError, open_fetcher
 from app.crawler.fetchers.base import USER_AGENTS
+from app.ai.tagging import auto_tag_new
+from app.crawler.errors import classify_error
 from app.crawler.health import update_health
-from app.crawler.pipeline import upsert_lots
+from app.crawler.throttle import domain_of, throttle
+from app.crawler.pipeline import UpsertStats, upsert_lots
 from app.db import SessionLocal
 from app.models import CrawlRun, Lot, Rule, Source
 from app.models.entities import utcnow
 from app.schemas.rule import RuleConfig
+from app.notify import notify
 from app.security import decrypt_json, encrypt_json
+from app.subscriptions import notify_after_crawl
 from app.settings_store import get_setting
 
 log = logging.getLogger(__name__)
@@ -62,11 +68,15 @@ KnownKeys = Callable[[list[str]], Awaitable[set[str]]]
 
 
 async def fetch_with_retry(
-    fetcher: Fetcher, url: str, runlog: RunLog, method: str = "GET", body: dict[str, Any] | None = None
+    fetcher: Fetcher, url: str, runlog: RunLog, method: str = "GET", body: dict[str, Any] | None = None,
+    domain_interval: float = 0.0,
 ) -> Fetched:
-    """失败自动重试（指数退避 1s、2s），登录失败不重试。"""
+    """失败自动重试（指数退避 1s、2s），登录失败不重试；每次请求前按域名限速。"""
     for attempt in range(1, RETRIES + 1):
         try:
+            waited = await throttle(url, domain_interval)
+            if waited >= 1:
+                runlog.info(f"按域名限速等待 {waited:.1f}s（{domain_of(url)}）")
             return await fetcher.fetch(url, method, body)
         except LoginError:
             raise
@@ -76,6 +86,13 @@ async def fetch_with_retry(
             runlog.warn(f"请求失败（第 {attempt} 次）：{type(exc).__name__}: {str(exc)[:200]}，{2 ** (attempt - 1)}s 后重试")
             await asyncio.sleep(2 ** (attempt - 1))
     raise AssertionError("unreachable")
+
+
+def _item_key(item: dict[str, Any], key_field: str) -> str:
+    value = item.get(key_field)
+    if value is None:
+        value = json.dumps({k: str(v) for k, v in item.items()}, sort_keys=True, ensure_ascii=False)
+    return str(value)
 
 
 def _page_requests(ctx: FetchContext, config: RuleConfig) -> list[tuple[str, dict[str, Any] | None]] | None:
@@ -110,25 +127,43 @@ async def crawl(
     seen: set[str] = set()
     interval = 1 / rate_limit if rate_limit > 0 else 0
 
-    async with open_fetcher(ctx, fc) as fetcher:
-        while queue and result.pages < limit:
-            url, body = queue.pop(0)
-            key = f"{url}|{body}"
-            if key in seen:
-                continue
-            seen.add(key)
-            if result.pages and interval:
-                await asyncio.sleep(interval)
-            started = time.monotonic()
-            fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body)
-            page = extract_page(fetched.html, fetched.url, config)
+    key_field = config.list.unique_key or "url"
+    item_keys: set[str] = set()
+
+    async with open_fetcher(ctx, fc, capture_json=bool(fc.capture)) as fetcher:
+        clicked: Fetched | None = None  # 点击翻页得到的下一页内容
+        click_started = 0.0
+        while (queue or clicked) and result.pages < limit:
+            started = click_started if clicked is not None else time.monotonic()
+            if clicked is not None:
+                fetched, url, body, clicked = clicked, clicked.url, None, None
+                source = f"点击「{config.pagination.selector}」"
+            else:
+                url, body = queue.pop(0)
+                key = f"{url}|{body}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                if result.pages and interval:
+                    await asyncio.sleep(interval)
+                fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body, ctx.domain_interval)
+                source = url + (f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else "")
+            if fc.capture:
+                page = extract_captured(fetched.json_responses, fetched.url, config)
+            else:
+                page = extract_page(fetched.html, fetched.url, config)
             result.pages += 1
-            result.items.extend(page.items)
+            new_items = []
+            for it in page.items:  # 同一页内也要去重（有的页面会重复请求同一个列表接口）
+                k = _item_key(it, key_field)
+                if k not in item_keys:
+                    item_keys.add(k)
+                    new_items.append(it)
+            result.items.extend(new_items)
             result.errors.extend(page.errors)
-            page_no = f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else ""
             runlog.info(
-                f"第 {result.pages} 页 {url}{page_no} → HTTP {fetched.status}，{len(fetched.html)} 字节，"
-                f"抽取 {len(page.items)} 条，耗时 {time.monotonic() - started:.1f}s"
+                f"第 {result.pages} 页 {source} → HTTP {fetched.status}，{len(fetched.html)} 字节，"
+                f"抽取 {len(page.items)} 条（新 {len(new_items)} 条），耗时 {time.monotonic() - started:.1f}s"
             )
             for err in page.errors[:3]:
                 runlog.warn(err)
@@ -142,19 +177,33 @@ async def crawl(
                     snippet = fetched.html[:1500] if config.fetch.mode == "api" else compress_html(fetched.html, 1500)
                     runlog.warn(f"页面片段（{fetched.url}）：{snippet}")
                 break
+            if result.pages > 1 and not new_items:
+                runlog.info("翻页后没有新的拍品（页面内容未变化），停止翻页")
+                break
             if page.next_url and f"{page.next_url}|None" not in seen:
                 queue.append((page.next_url, None))
-        if result.pages >= limit and queue:
+            if config.pagination.type == "click" and result.pages < limit:
+                if not hasattr(fetcher, "click_next"):
+                    runlog.warn("点击翻页需要浏览器模式，请把抓取方式改为浏览器渲染")
+                    break
+                if interval:
+                    await asyncio.sleep(interval)
+                await throttle(fetched.url, ctx.domain_interval)
+                click_started = time.monotonic()
+                clicked = await fetcher.click_next(config.pagination.selector or "")  # type: ignore[attr-defined]
+                if clicked is None:
+                    runlog.info(f"下一页按钮「{config.pagination.selector}」不存在或已禁用（已是最后一页），停止翻页")
+        if result.pages >= limit and (queue or clicked):
             runlog.info(f"已达到最大页数 {limit}，停止翻页")
 
         if with_detail and config.detail.enabled and result.items:
-            await _crawl_details(fetcher, config, result, runlog, interval, known_keys)
+            await _crawl_details(fetcher, config, result, runlog, interval, known_keys, ctx.domain_interval)
     return result
 
 
 async def _crawl_details(
     fetcher: Fetcher, config: RuleConfig, result: CrawlResult, runlog: RunLog, interval: float,
-    known_keys: KnownKeys | None,
+    known_keys: KnownKeys | None, domain_interval: float = 0.0,
 ) -> None:
     detail = config.detail
     key_field = config.list.unique_key or "url"
@@ -173,7 +222,7 @@ async def _crawl_details(
             await asyncio.sleep(interval)
         url = str(it[detail.url_field])
         try:
-            fetched = await fetch_with_retry(fetcher, url, runlog)
+            fetched = await fetch_with_retry(fetcher, url, runlog, domain_interval=domain_interval)
         except LoginError:
             raise
         except Exception as exc:
@@ -197,6 +246,16 @@ async def network_options(session: AsyncSession, use_proxy: bool) -> tuple[str |
     return proxy, ua
 
 
+async def apply_network(session: AsyncSession, ctx: FetchContext, use_proxy: bool) -> FetchContext:
+    """把代理、UA、指纹伪装、按域名限速等反爬设置应用到抓取上下文。"""
+    ctx.proxy, ctx.user_agent = await network_options(session, use_proxy)
+    if ctx.auth_config.get("user_agent"):
+        ctx.user_agent = ctx.auth_config["user_agent"]  # 人工登录会话与登录时的 UA 绑定
+    ctx.stealth = bool(await get_setting(session, "crawler.stealth"))
+    ctx.domain_interval = float(await get_setting(session, "crawler.domain_interval") or 0)
+    return ctx
+
+
 def context_for(source: Source) -> FetchContext:
     return FetchContext(
         start_url=source.start_url,
@@ -218,22 +277,22 @@ async def maybe_auto_repair(source_id: int) -> None:
 
 
 async def _live_refresh(
-    session: AsyncSession, source: Source, config: RuleConfig, ctx: FetchContext, run: CrawlRun, runlog: RunLog
-) -> tuple[int, int, int]:
-    """盯价：只刷新进行中的拍品。配置了详情页时逐个抓取详情，否则重新抓取列表页。返回 (页数/详情数, 抓取数, 变化数)。"""
+    session: AsyncSession, source: Source, config: RuleConfig, ctx: FetchContext, run: CrawlRun, runlog: RunLog,
+    ending_window: int | None = None,
+) -> tuple[int, int, UpsertStats]:
+    """盯价：只刷新进行中的拍品（ending_window 给定时只刷新该分钟数内结束的）。
+    配置了详情页时逐个抓取详情，否则重新抓取列表页。返回 (页数/详情数, 抓取数, 入库统计)。"""
     now = utcnow()
-    lots = (
-        await session.scalars(
-            select(Lot)
-            .where(Lot.source_id == source.id, Lot.status == "live")
-            .where(or_(Lot.end_time.is_(None), Lot.end_time > now - timedelta(hours=1)))
-            .order_by(Lot.end_time.asc().nulls_last())
-            .limit(LIVE_LIMIT)
-        )
-    ).all()
-    runlog.info(f"盯价：找到 {len(lots)} 个进行中的拍品")
+    stmt = select(Lot).where(Lot.source_id == source.id, Lot.status == "live")
+    if ending_window:
+        stmt = stmt.where(Lot.end_time > now - timedelta(minutes=5), Lot.end_time <= now + timedelta(minutes=ending_window))
+    else:
+        stmt = stmt.where(or_(Lot.end_time.is_(None), Lot.end_time > now - timedelta(hours=1)))
+    lots = (await session.scalars(stmt.order_by(Lot.end_time.asc().nulls_last()).limit(LIVE_LIMIT))).all()
+    what = f"{ending_window} 分钟内结束" if ending_window else "进行中"
+    runlog.info(f"盯价：找到 {len(lots)} 个{what}的拍品")
     if not lots:
-        return 0, 0, 0
+        return 0, 0, UpsertStats()
 
     if not config.detail.enabled:
         runlog.info("规则未配置详情页，重新抓取列表页以刷新价格")
@@ -242,7 +301,7 @@ async def _live_refresh(
         key_field = config.list.unique_key or "url"
         items = [it for it in result.items if str(it.get(key_field) or it.get("url")) in live_keys]
         stats = await upsert_lots(session, source.id, run.id, items, config.list.unique_key)
-        return result.pages, len(items), stats.updated
+        return result.pages, len(items), stats
 
     key_field = config.list.unique_key or "url"
     items: list[dict[str, Any]] = []
@@ -257,7 +316,7 @@ async def _live_refresh(
             if i and interval:
                 await asyncio.sleep(interval)
             try:
-                fetched = await fetch_with_retry(fetcher, str(url), runlog)
+                fetched = await fetch_with_retry(fetcher, str(url), runlog, domain_interval=ctx.domain_interval)
             except LoginError:
                 raise
             except Exception as exc:
@@ -266,12 +325,13 @@ async def _live_refresh(
             values, _ = extract_detail(fetched.html, fetched.url, config.detail)
             items.append({**{k: v for k, v in values.items() if v is not None}, key_field: lot.unique_key, "url": lot.url})
     stats = await upsert_lots(session, source.id, run.id, items, key_field)
-    return len(items), len(items), stats.updated
+    return len(items), len(items), stats
 
 
 async def run_crawl(run_id: int) -> None:
     runlog = RunLog()
     items: list[dict[str, Any]] | None = None
+    stats: UpsertStats | None = None
     async with SessionLocal() as session:
         run = await session.get(CrawlRun, run_id)
         if run is None:
@@ -286,8 +346,7 @@ async def run_crawl(run_id: int) -> None:
                 raise RuntimeError("站点不存在或没有启用的规则")
             run.rule_version = rule.version
             config = RuleConfig.model_validate(rule.config)
-            ctx = context_for(source)
-            ctx.proxy, ctx.user_agent = await network_options(session, source.use_proxy)
+            ctx = await apply_network(session, context_for(source), source.use_proxy)
             mode = config.fetch.mode or source.fetch_mode
             runlog.info(
                 f"开始{'盯价' if run.kind == 'live' else '采集'}：{source.name}，规则 v{rule.version}，抓取方式 {mode}"
@@ -301,8 +360,10 @@ async def run_crawl(run_id: int) -> None:
 
             ctx.on_storage_state = save_state
 
-            if run.kind == "live":
-                run.pages, run.items_found, run.items_updated = await _live_refresh(session, source, config, ctx, run, runlog)
+            if run.kind in ("live", "ending"):
+                window = int(await get_setting(session, "live.boost_window_minutes") or 30) if run.kind == "ending" else None
+                run.pages, run.items_found, stats = await _live_refresh(session, source, config, ctx, run, runlog, window)
+                run.items_updated = stats.updated
                 run.status = "success"
                 runlog.info(f"盯价完成：刷新 {run.items_found} 个拍品，价格/状态变化 {run.items_updated} 个")
             else:
@@ -318,6 +379,7 @@ async def run_crawl(run_id: int) -> None:
                 run.pages = result.pages
                 run.items_found = len(result.items)
                 run.items_new, run.items_updated = stats.new, stats.updated
+                await session.commit()
                 runlog.info(f"入库完成：抓取 {len(result.items)} 条，新增 {stats.new} 条，价格/状态变化 {stats.updated} 条")
                 run.status = "success" if result.items else "failed"
                 if not result.items:
@@ -325,6 +387,16 @@ async def run_crawl(run_id: int) -> None:
                     runlog.error(run.error)
                 elif result.errors:
                     run.error = "\n".join(result.errors[:20])
+        except LoginError as exc:
+            await session.rollback()
+            run = await session.get(CrawlRun, run_id)
+            assert run
+            run.status, run.error = "failed", str(exc)[:4000]
+            runlog.error(run.error)
+            src = await session.get(Source, run.source_id)
+            if src is not None and src.login_expired_at is None:
+                src.login_expired_at = utcnow()
+                await notify(session, f"登录失效：{src.name}", f"{exc}\n站点：{src.start_url}")
         except Exception as exc:
             log.exception("crawl run %s failed", run_id)
             await session.rollback()
@@ -333,14 +405,33 @@ async def run_crawl(run_id: int) -> None:
             run.status, run.error = "failed", f"{type(exc).__name__}: {exc}"[:4000]
             runlog.error(run.error)
         run.finished_at = utcnow()
+        if run.started_at:
+            run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
+        run.error_type = classify_error(run.error) if run.status == "failed" else None
+        if run.status == "success":
+            src = await session.get(Source, run.source_id)
+            if src is not None and src.login_expired_at is not None:
+                src.login_expired_at = None
+                runlog.info("登录状态已恢复正常")
+                await notify(session, f"登录已恢复：{src.name}", "采集恢复正常")
         needs_repair = False
         source = await session.get(Source, run.source_id)
         # 盯价任务只刷新已有拍品，不参与规则健康判定
-        if source is not None and run.kind != "live":
+        if source is not None and run.kind == "full":
             needs_repair = await update_health(session, source, run, items)
             if source.health != "ok":
                 runlog.warn(f"规则健康状态：{source.health}，{source.health_message}")
         run.log = runlog.entries
         await session.commit()
+        if stats is not None:
+            try:
+                # 先标注新拍品，订阅中按标签筛选才能命中
+                await auto_tag_new(stats.new_ids)
+            except Exception:
+                log.exception("auto tag failed for run %s", run_id)
+            try:
+                await notify_after_crawl(session, stats.new_ids, stats.price_changes)
+            except Exception:
+                log.exception("subscription notify failed for run %s", run_id)
         if needs_repair and source is not None:
             await maybe_auto_repair(source.id)

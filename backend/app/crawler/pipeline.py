@@ -1,6 +1,6 @@
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -25,6 +25,9 @@ ALIASES = {"price": "current_price", "bids": "bid_count", "img": "image", "link"
 class UpsertStats:
     new: int = 0
     updated: int = 0
+    new_ids: list[int] = field(default_factory=list)
+    # 价格变化的拍品：(lot_id, 旧价格, 新价格)
+    price_changes: list[tuple[int, Decimal | None, Decimal | None]] = field(default_factory=list)
 
 
 def jsonable(value: Any) -> Any:
@@ -106,6 +109,7 @@ async def upsert_lots(
             session.add(lot)
             await session.flush()
             stats.new += 1
+            stats.new_ids.append(lot.id)
             changed = True
         else:
             old = (lot.deal_price or lot.current_price, lot.bid_count, lot.status)
@@ -119,6 +123,8 @@ async def upsert_lots(
             changed = _changed(old, new)
             if changed:
                 stats.updated += 1
+                if _changed((old[0],), (new[0],)):
+                    stats.price_changes.append((lot.id, old[0], new[0]))
         if changed:
             session.add(
                 PriceSnapshot(

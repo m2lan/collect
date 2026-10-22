@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "拍卖采集助手",
+  "version": "1.0.0",
+  "description": "一键把当前拍卖页面加入拍卖价格采集平台，可带上当前登录状态，自动套用模板或由 AI 生成采集规则。",
+  "permissions": [
+    "storage",
+    "tabs",
+    "cookies",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "加入采集",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

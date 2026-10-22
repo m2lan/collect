@@ -10,6 +10,8 @@ from fastapi.responses import Response
 from sqlalchemy import Select, func, or_, select
 
 from app.config import get_settings
+from app.search import parse_synonyms, search_condition
+from app.settings_store import get_setting
 from app.api.deps import SessionDep
 from app.models import Lot, PriceSnapshot, Source
 from app.schemas.api import LotDetailOut, LotOut, Page
@@ -24,15 +26,21 @@ SortField = Literal[
 
 def _filtered(
     stmt: Select, source_id: int | None, status_: str | None, keyword: str | None,
-    min_price: float | None, max_price: float | None,
+    min_price: float | None, max_price: float | None, synonyms: list[set[str]] | None = None,
+    category: str | None = None, era: str | None = None,
 ) -> Select:
     if source_id:
         stmt = stmt.where(Lot.source_id == source_id)
     if status_:
         stmt = stmt.where(Lot.status == status_)
     if keyword:
-        like = f"%{keyword}%"
-        stmt = stmt.where(or_(Lot.title.ilike(like), Lot.unique_key.ilike(like)))
+        cond = search_condition(keyword, synonyms)
+        if cond is not None:
+            stmt = stmt.where(cond)
+    if category:
+        stmt = stmt.where(Lot.tags["category"].as_string() == category)
+    if era:
+        stmt = stmt.where(Lot.tags["era"].as_string().ilike(f"%{era}%"))
     price = func.coalesce(Lot.deal_price, Lot.current_price)
     if min_price is not None:
         stmt = stmt.where(price >= min_price)
@@ -52,8 +60,11 @@ async def list_lots(
     sort: SortField = "-last_seen_at",
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
+    category: str | None = None,
+    era: str | None = None,
 ) -> Page[LotOut]:
-    args = (source_id, status_, keyword, min_price, max_price)
+    synonyms = parse_synonyms(await get_setting(session, "search.synonyms"))
+    args = (source_id, status_, keyword, min_price, max_price, synonyms, category, era)
     total = await session.scalar(_filtered(select(func.count()).select_from(Lot), *args))
     column = getattr(Lot, sort.lstrip("-"))
     order = column.desc().nulls_last() if sort.startswith("-") else column.asc().nulls_last()
@@ -75,6 +86,8 @@ EXPORT_COLUMNS = [
     ("status", "状态"), ("start_time", "开始时间"), ("end_time", "结束时间"), ("url", "链接"), ("image", "图片"),
     ("first_seen_at", "首次采集"), ("last_seen_at", "最近采集"),
 ]
+TAG_COLUMNS = [("category", "品类"), ("sub_category", "细分品类"), ("era", "年代"), ("material", "材质"),
+               ("origin", "产地"), ("brand", "品牌/作者")]
 EXPORT_LIMIT = 100_000
 
 
@@ -98,12 +111,16 @@ async def export_lots(
     min_price: float | None = None,
     max_price: float | None = None,
     sort: SortField = "-last_seen_at",
+    category: str | None = None,
+    era: str | None = None,
 ) -> Response:
     """按当前筛选条件导出拍品，扩展字段展开为独立列。"""
+    synonyms = parse_synonyms(await get_setting(session, "search.synonyms"))
     column = getattr(Lot, sort.lstrip("-"))
     order = column.desc().nulls_last() if sort.startswith("-") else column.asc().nulls_last()
     stmt = (
-        _filtered(select(Lot, Source.name).join(Source, Source.id == Lot.source_id), source_id, status_, keyword, min_price, max_price)
+        _filtered(select(Lot, Source.name).join(Source, Source.id == Lot.source_id), source_id, status_, keyword,
+                  min_price, max_price, synonyms, category, era)
         .order_by(order, Lot.id.desc())
         .limit(EXPORT_LIMIT)
     )
@@ -114,12 +131,13 @@ async def export_lots(
         for k in lot.extra or {}:
             if k not in extra_keys:
                 extra_keys.append(k)
-    header = [label for _, label in EXPORT_COLUMNS] + extra_keys
+    header = [label for _, label in EXPORT_COLUMNS] + [label for _, label in TAG_COLUMNS] + extra_keys
     table = []
     for lot, name in rows:
         values = {**{c: getattr(lot, c, None) for c, _ in EXPORT_COLUMNS}, "source_name": name}
         values["status"] = STATUS_LABEL.get(lot.status or "", lot.status)
         row = [_cell(values[c], tz) for c, _ in EXPORT_COLUMNS]
+        row += [_cell((lot.tags or {}).get(k), tz) for k, _ in TAG_COLUMNS]
         row += [_cell((lot.extra or {}).get(k), tz) for k in extra_keys]
         table.append(row)
 
@@ -152,6 +170,31 @@ async def export_lots(
     wb.save(out)
     return Response(out.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": disposition})
+
+
+@router.get("/facets")
+async def facets(session: SessionDep) -> dict:
+    """AI 标签的可选值及数量（用于筛选下拉框）。"""
+    out = {}
+    for key in ("category", "era"):
+        col = Lot.tags[key].as_string()
+        rows = (await session.execute(
+            select(col, func.count()).where(col.is_not(None), col != "").group_by(col).order_by(func.count().desc()).limit(50)
+        )).all()
+        out[key] = [{"value": v, "count": n} for v, n in rows]
+    out["untagged"] = await session.scalar(select(func.count()).select_from(Lot).where(Lot.tagged_at.is_(None))) or 0
+    return out
+
+
+@router.get("/{lot_id}/similar")
+async def similar(lot_id: int, session: SessionDep, limit: int = Query(10, ge=1, le=50)) -> dict:
+    """相似 / 同款拍品（跨平台）及其价格分布。"""
+    from app.analytics import similar_lots
+
+    lot = await session.get(Lot, lot_id)
+    if lot is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "拍品不存在")
+    return await similar_lots(session, lot, limit)
 
 
 @router.get("/{lot_id}", response_model=LotDetailOut)

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>拍卖采集助手</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <img src="icons/icon32.png" alt="" />
+    <span>拍卖采集助手</span>
+    <button id="logout" class="link hidden" type="button">退出</button>
+  </header>
+
+  <section id="login-view" class="hidden">
+    <label>平台地址<input id="server" placeholder="http://你的服务器:8080" /></label>
+    <label>用户名<input id="username" autocomplete="username" /></label>
+    <label>密码<input id="password" type="password" autocomplete="current-password" /></label>
+    <button id="login" class="primary" type="button">登录</button>
+    <p class="muted">需要操作员或管理员账号。登录信息只保存在本插件中。</p>
+  </section>
+
+  <section id="main-view" class="hidden">
+    <div class="page">
+      <div id="page-title" class="title"></div>
+      <div id="page-url" class="url"></div>
+    </div>
+    <label>站点名称<input id="name" /></label>
+    <label>采集规则
+      <select id="method">
+        <option value="ai">AI 自动生成规则</option>
+        <option value="none">只添加站点，稍后在平台配置规则</option>
+      </select>
+    </label>
+    <div id="template-hint" class="hint hidden"></div>
+    <label>抓取方式
+      <select id="fetch-mode">
+        <option value="browser">浏览器渲染（推荐）</option>
+        <option value="static">静态请求</option>
+      </select>
+    </label>
+    <label class="check"><input id="with-cookies" type="checkbox" /> 带上我在该网站的登录状态（<span id="cookie-count">0</span> 个 Cookie）</label>
+    <label class="check"><input id="crawl-now" type="checkbox" checked /> 添加后立即采集一次</label>
+    <label id="hint-wrap">给 AI 的补充要求（可选）<input id="hint" placeholder="如：还要抓保证金和评估价" /></label>
+    <button id="add" class="primary" type="button">加入采集</button>
+    <div id="result" class="result hidden"></div>
+  </section>
+  <script src="popup.js"></script>
+</body>
+</html>
