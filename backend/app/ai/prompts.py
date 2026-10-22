@@ -9,6 +9,15 @@ TOOL_DESCRIPTION = "提交为该拍卖列表页生成的采集规则及说明"
 SYSTEM_PROMPT = """你是网页数据采集专家，负责为拍卖平台的拍品列表页编写声明式采集规则（JSON）。
 你会收到页面 URL、精简后的 HTML（重复结构只保留了前几个样本，并用注释标出省略数量），有时还有截图和页面发出的 JSON 接口响应。
 
+## 先判断页面类型（page_kind）
+- lots：页面直接列出一个个拍品（有拍品标题、价格、拍品详情链接）→ 按下面的规则结构生成 rule。
+- events：页面列出的是拍卖会 / 专场 / 场次（Auction、Event、Sale、Catalog、专场、拍卖会），每个条目点进去才是拍品列表；
+  常见特征：条目标题像“298: High-End Photonics & Test Equipment”“2026 春季瓷器专场”，带“View All Lots / 查看拍品 / N 件拍品”，
+  链接形如 /Event/Details/...、/auction/123、/session/...。此时**不要**把专场当成拍品，
+  只需返回 page_kind="events" 和 entry_link_selector（匹配每个专场链接 a 元素的 CSS 选择器，每个专场最好只匹配一个链接），rule 可省略；
+  系统会打开第一个专场，再请你为专场里的拍品列表生成规则，之后的采集会自动逐个进入各专场。
+- 首页同时有专场入口和拍品时，以拍品为准（lots）。
+
 ## 规则结构
 - fetch：抓取参数。mode 一般留空（沿用站点设置）；浏览器模式下可设置 wait_for（拍品出现后才抓取的 CSS 选择器）、scroll（是否滚动加载）、wait_ms。
 - list.item_selector：匹配"每一个拍品容器"的选择器（每个拍品恰好匹配一个元素）。item_selector_type 为 css 或 xpath。
@@ -85,14 +94,27 @@ def tool_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "explanation": {"type": "string", "description": "中文说明：容器与各字段的选择依据"},
+            "page_kind": {
+                "type": "string", "enum": ["lots", "events"],
+                "description": "lots=页面直接列出拍品；events=页面列出的是拍卖会/专场，需要进入专场才能看到拍品",
+            },
+            "entry_link_selector": {"type": "string", "description": "page_kind=events 时：匹配各专场链接 a 元素的 CSS 选择器"},
             "rule": _inline_refs(RuleConfig.model_json_schema(by_alias=True)),
             "missing_fields": {
                 "type": "array", "items": {"type": "string"},
                 "description": "管理员要求但列表页上没有、需要到详情页抓取的字段 key",
             },
         },
-        "required": ["explanation", "rule"],
+        "required": ["explanation"],
     }
+
+
+def event_page_message(index_url: str, links: list[str]) -> str:
+    return (
+        f"这是从入口页 {index_url} 进入的第一个专场（入口页共找到 {len(links)} 个专场，之后会用同一规则逐个抓取）。"
+        "现在这个页面应当是拍品列表，请 page_kind 设为 lots，为其中的拍品生成规则。"
+        "注意：各专场地址不同，翻页不能用 url_template，请用 next_link、page_param（页码查询参数）或 click。"
+    )
 
 
 DETAIL_TOOL_NAME = "submit_detail_rule"

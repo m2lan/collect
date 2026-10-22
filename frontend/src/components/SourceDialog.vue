@@ -139,6 +139,7 @@
               <p><b>pagination</b>：none / next_link（"下一页"链接的 selector）/ url_template（template 含 {page}）/ click（"下一页"按钮的 selector，适用于点击后由 JS 加载的网站，需浏览器渲染）。无限滚动加载用 fetch.scroll=true。</p>
               <p><b>fetch</b>：浏览器模式下可设置 wait_for（等待元素）、scroll（滚动加载）、wait_ms。</p>
               <p><b>接口模式</b>：fetch.mode 设为 api，fetch.url / method / body 指定接口；item_selector_type 为 jsonpath（如 $.data.list[*]），字段 type 为 jsonpath（如 $.title）；翻页用 url_template 或 page_param（param 为页码参数名）。推荐用"嗅探接口"自动生成。</p>
+              <p><b>entry</b>（入口页）：站点链接是拍卖会 / 专场列表时设置 {"link_selector": ".event a.view", "max_links": 10}，采集时先找出各专场链接，再逐个进入专场按 list 和 pagination 抓拍品（翻页不能用 url_template）。AI 生成时会自动识别。</p>
               <p><b>detail</b>：{"enabled": true, "url_field": "url", "fields": [...], "max_items": 50, "only_new": true} 打开每个拍品的详情页补充字段（选择器相对整个详情页），详情页的值优先；盯价任务也通过详情页刷新价格。</p>
             </div>
           </el-collapse-item>
@@ -149,6 +150,11 @@
             抓取 {{ previewResult.pages }} 页，抽取到 <b>{{ previewResult.count }}</b> 条
           </div>
           <el-alert v-for="e in previewResult.errors" :key="e" :title="e" type="warning" :closable="false" style="margin-bottom: 4px" />
+          <el-collapse v-if="previewResult.log?.length" style="margin-bottom: 8px">
+            <el-collapse-item :title="`抓取日志（${previewResult.log.length} 条）`">
+              <div v-for="(e, i) in previewResult.log" :key="i" class="preview-log" :class="e.level">{{ e.msg }}</div>
+            </el-collapse-item>
+          </el-collapse>
           <el-table :data="previewResult.items" size="small" max-height="320" border>
             <el-table-column v-for="col in previewColumns" :key="col" :label="col" :prop="col" min-width="140" show-overflow-tooltip />
           </el-table>
@@ -482,4 +488,7 @@ async function logout() {
 <style scoped>
 .help p { margin: 4px 0; }
 .ai-bar { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+.preview-log { font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+.preview-log.warn, .preview-log.warning { color: var(--el-color-warning); }
+.preview-log.error { color: var(--el-color-danger); }
 </style>

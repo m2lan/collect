@@ -8,7 +8,7 @@ from app.crawler.cookies import parse_cookies
 from app.crawler.fetchers import FetchContext, LoginError
 from app.crawler.pipeline import jsonable
 from app.crawler.fetchers import open_fetcher
-from app.crawler.runner import apply_network, crawl
+from app.crawler.runner import RunLog, apply_network, crawl
 from app.crawler.snapshot import sanitize_snapshot
 from app.schemas.rule import FetchConfig
 from app.models import CrawlRun, Lot, Rule, Schedule, Source
@@ -274,14 +274,16 @@ async def preview(body: PreviewIn, session: SessionDep) -> PreviewOut:
     """按当前（未保存的）配置试跑，不写入数据库。"""
     source = await _get_source(session, body.source_id) if body.source_id else None
     ctx = await build_context(session, body, source)
+    runlog = RunLog()
     try:
-        result = await crawl(ctx, body.rule, rate_limit=2, max_pages=body.max_pages, with_detail=body.rule.detail.enabled)
+        result = await crawl(ctx, body.rule, rate_limit=2, max_pages=body.max_pages, runlog=runlog,
+                             with_detail=body.rule.detail.enabled, max_entries=2)
     except LoginError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"抓取失败: {type(exc).__name__}: {exc}") from exc
     items = [{k: jsonable(v) for k, v in item.items()} for item in result.items[:100]]
-    return PreviewOut(pages=result.pages, count=len(result.items), items=items, errors=result.errors[:20])
+    return PreviewOut(pages=result.pages, count=len(result.items), items=items, errors=result.errors[:20], log=runlog.entries)
 
 
 @preview_router.post("/snapshot")

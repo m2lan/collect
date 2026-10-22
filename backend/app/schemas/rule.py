@@ -123,8 +123,18 @@ class DetailRule(BaseModel):
     only_new: bool = Field(True, description="只抓取首次出现的拍品的详情页")
 
 
+class EntryRule(BaseModel):
+    """入口页：站点链接是"拍卖会 / 专场列表"而不是拍品列表时，先从中找出各专场链接，再逐个按列表规则抓取拍品。"""
+
+    link_selector: str = Field(min_length=1, description="入口页中指向各专场（拍品列表页）的链接的 CSS 选择器")
+    attr: str = Field("href", description="链接所在属性")
+    max_links: int = Field(10, ge=1, le=200, description="每次最多进入的专场数量")
+    wait_for: str | None = Field(None, description="浏览器模式下入口页等待出现的 CSS 选择器")
+
+
 class RuleConfig(BaseModel):
     fetch: FetchConfig = Field(default_factory=FetchConfig)
+    entry: EntryRule | None = Field(None, description="可选：站点链接是专场列表时，先进入各专场再抓拍品")
     list: ListRule
     pagination: Pagination = Field(default_factory=Pagination)
     detail: DetailRule = Field(default_factory=DetailRule)
@@ -148,6 +158,11 @@ class RuleConfig(BaseModel):
             raise ValueError("截获接口时没有可解析的 HTML 链接，翻页请使用 click、url_template 或 page_param")
         if self.pagination.type == "click" and self.fetch.mode == "static":
             raise ValueError("click 翻页需要浏览器模式（fetch.mode 为 browser 或留空并在站点中选择浏览器渲染）")
+        if self.entry:
+            if self.fetch.mode == "api" or self.fetch.url:
+                raise ValueError("入口页（entry）不能与 api 模式 / fetch.url 同时使用")
+            if self.pagination.type == "url_template":
+                raise ValueError("使用入口页时各专场的地址不同，翻页请用 next_link、page_param 或 click，不能用 url_template")
         if self.detail.enabled and any(f.type in ("jsonpath", "template") for f in self.detail.fields):
             raise ValueError("详情页字段不支持 jsonpath / template")
         return self

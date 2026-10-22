@@ -9,7 +9,7 @@ from jsonpath_ng.ext import parse as jsonpath_parse
 from parsel import Selector
 
 from app.crawler.transforms import apply_transforms
-from app.schemas.rule import DetailRule, FieldRule, Pagination, RuleConfig
+from app.schemas.rule import DetailRule, EntryRule, FieldRule, Pagination, RuleConfig
 
 
 @dataclass
@@ -197,3 +197,16 @@ def page_urls(start_url: str, pagination: Pagination, method: str = "GET") -> li
         query = dict(parse_qsl(parts.query, keep_blank_values=True))
         return [urlunsplit(parts._replace(query=urlencode({**query, pagination.param: p}))) for p in pages]
     return None
+
+
+def entry_links(html: str, url: str, entry: EntryRule) -> list[str]:
+    """入口页中的专场链接（绝对地址、去重、保持页面顺序）。"""
+    links: list[str] = []
+    for node in Selector(text=html).css(entry.link_selector):
+        href = (node.attrib.get(entry.attr) or "").strip()
+        if not href or href.startswith(("javascript:", "#", "mailto:")):
+            continue
+        full = urljoin(url, href).split("#")[0]
+        if full != url and full not in links:
+            links.append(full)
+    return links

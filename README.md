@@ -19,6 +19,7 @@
 - 接口嗅探：自动找出页面背后返回拍品列表的 JSON 接口并猜测字段（必要时自动切换为接口捕获）
 - 手写 JSON / 从规则模板导入 / **Chrome 浏览器插件**一键把当前页面和登录 Cookie 添加为站点
 - 支持翻页（下一页链接 / 点击 JS 翻页按钮 / URL 模板 / 页码参数 / 滚动加载）、详情页补充字段（保证金、评估价等）
+- 支持"拍卖会 / 专场列表 → 专场内拍品"两级结构：给首页或拍卖会列表页即可，AI 会识别并自动逐个进入专场
 
 **采集与监控**
 - 手动采集、定时采集（cron）、盯价（只刷新进行中拍品的价格）、**临近结束加密盯价**
@@ -124,4 +125,5 @@ npm run dev                            # http://localhost:5173，/api 代理到 
 - 翻页：`next_link`（带 href 的下一页链接）、`click`（点击"下一页"按钮，浏览器模式）、`url_template`（`?page={page}`）、`page_param`（接口页码参数）；无限滚动用 `fetch.scroll: true`。翻页后没有新拍品会自动停止。
 - 详情页字段：`detail.fields` 的选择器相对整个详情页；"保证金：¥5,000"这类信息推荐用 `{"type": "regex", "pattern": "保证金[：:\\s]*([¥￥]?[\\d,.]+)", "transform": ["price"]}` 从整页文本匹配。
 - 接口模式：`fetch` 设 `"mode": "api", "url": "...", "method": "GET|POST", "body": {...}`，`item_selector` 如 `$.data.list[*]`，字段 `type: "jsonpath"`，翻页用 `url_template` 或 `{"type": "page_param", "param": "pageNo"}`。
+- 入口页：站点链接是拍卖会 / 专场列表（每个专场点进去才是拍品）时，设 `"entry": {"link_selector": ".event a.view", "max_links": 10}`，采集时先从入口页找出各专场链接，再逐个按 `list` 与 `pagination` 抓取；AI 生成规则时会自动识别这类页面。
 - 接口捕获：浏览器模式设 `"fetch": {"capture": "接口 URL 正则", "capture_body": "可选，响应需包含的文本"}`，`item_selector` 用 JSONPath；字段可用 `{"type": "template", "template": "https:{auctionLink}"}` 拼接，`map` 转换把原始值映射为标准状态。

@@ -45,6 +45,23 @@ DETAIL_PAGE = """<html><body><h1 class="lot-title">{title}</h1>
 <div class="estimate">估价：RMB 80,000-120,000</div><div class="deposit">保证金 ¥5,000</div></body></html>"""
 
 
+EVENTS_PAGE = """<html><body><h1>Auctions</h1>
+<div class="event"><h3>298: High-End Photonics &amp; Test Equipment</h3><p>Starts 10/28/2026</p>
+  <a class="view" href="/event/1">View All Lots</a></div>
+<div class="event"><h3>301: Semiconductor Fab Closure</h3><p>Ends 11/02/2026</p>
+  <a class="view" href="/event/2">View All Lots</a></div>
+</body></html>"""
+
+
+def event_page(event: str, page: str) -> str:
+    """专场页：专场 1 有两页（复用列表页夹具），专场 2 一页且拍品编号不同。"""
+    if event == "1":
+        html = fixture_html(f"list_page{page}.html")
+        return html.replace('href="/list?page=2"', 'href="/event/1?page=2"')
+    html = fixture_html("list_page1.html").replace("/lot/100", "/lot/200").replace('<a class="next" href="/list?page=2">下一页</a>', "")
+    return html
+
+
 def lots_page(page: int, size: int = 2) -> dict:
     chunk = LOTS[(page - 1) * size : page * size]
     return {"code": 0, "data": {"list": chunk, "total": len(LOTS), "page": page}}
@@ -82,6 +99,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(lots_page(int(parse_qs(url.query).get("page", ["1"])[0])))
         if url.path == "/spa":
             return self._send(SPA_PAGE)
+        if url.path == "/events":
+            return self._send(EVENTS_PAGE)
+        if url.path.startswith("/event/"):
+            return self._send(event_page(url.path.rsplit("/", 1)[-1], parse_qs(url.query).get("page", ["1"])[0]))
         if url.path == "/jslist":
             return self._send(JS_LIST_PAGE)
         if url.path.startswith("/lot/"):

@@ -96,6 +96,7 @@ class PreviewOut(BaseModel):
     count: int
     items: list[dict[str, Any]]
     errors: list[str]
+    log: list[dict[str, Any]] = []
 
 
 class RuleIn(BaseModel):

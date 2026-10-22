@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.crawler.extractor import extract_captured, extract_detail, extract_page, page_urls
+from app.crawler.extractor import entry_links, extract_captured, extract_detail, extract_page, page_urls
 from app.crawler.fetchers import FetchContext, Fetched, Fetcher, LoginError, open_fetcher
 from app.crawler.fetchers.base import USER_AGENTS
 from app.ai.tagging import auto_tag_new
@@ -22,7 +22,7 @@ from app.crawler.pipeline import UpsertStats, upsert_lots
 from app.db import SessionLocal
 from app.models import CrawlRun, Lot, Rule, Source
 from app.models.entities import utcnow
-from app.schemas.rule import RuleConfig
+from app.schemas.rule import FetchConfig, RuleConfig
 from app.notify import notify
 from app.security import decrypt_json, encrypt_json
 from app.subscriptions import notify_after_crawl
@@ -95,16 +95,39 @@ def _item_key(item: dict[str, Any], key_field: str) -> str:
     return str(value)
 
 
-def _page_requests(ctx: FetchContext, config: RuleConfig) -> list[tuple[str, dict[str, Any] | None]] | None:
+def _page_requests(start: str, config: RuleConfig) -> list[tuple[str, dict[str, Any] | None]] | None:
     """能预先算出的分页请求列表（url, POST body）；next_link 等需逐页发现的返回 None。"""
     fc, pg = config.fetch, config.pagination
-    start = fc.url or ctx.start_url
     if pg.type == "page_param" and fc.method == "POST":
         return [(start, {**(fc.body or {}), str(pg.param): p}) for p in range(pg.start, pg.start + pg.max_pages)]
     urls = page_urls(start, pg, fc.method)
     if urls is None:
         return None
     return [(u, fc.body) for u in urls]
+
+
+async def find_entry_links(ctx: FetchContext, config: RuleConfig, runlog: RunLog) -> list[str]:
+    """打开入口页（专场列表），返回要逐个抓取的专场链接。"""
+    entry = config.entry
+    assert entry is not None
+    fc = config.fetch
+    # 入口页单独抓取：不截获接口、不滚动，避免等待列表接口超时
+    fetch = FetchConfig(mode=fc.mode, wait_for=entry.wait_for, wait_ms=fc.wait_ms, timeout=fc.timeout)  # type: ignore[arg-type]
+    started = time.monotonic()
+    async with open_fetcher(ctx, fetch) as fetcher:
+        fetched = await fetch_with_retry(fetcher, ctx.start_url, runlog, domain_interval=ctx.domain_interval)
+    links = entry_links(fetched.html, fetched.url, entry)
+    runlog.info(
+        f"入口页 {ctx.start_url} → HTTP {fetched.status}，找到 {len(links)} 个专场链接"
+        f"（选择器「{entry.link_selector}」），耗时 {time.monotonic() - started:.1f}s"
+    )
+    if not links:
+        from app.ai.html_compress import compress_html
+
+        runlog.warn(f"入口页没有找到专场链接，页面片段：{compress_html(fetched.html, 1500)}")
+    elif len(links) > entry.max_links:
+        runlog.info(f"专场数超过上限，只抓取前 {entry.max_links} 个")
+    return links[: entry.max_links]
 
 
 async def crawl(
@@ -115,90 +138,119 @@ async def crawl(
     runlog: RunLog | None = None,
     known_keys: KnownKeys | None = None,
     with_detail: bool = True,
+    max_entries: int | None = None,
 ) -> CrawlResult:
-    """按规则抓取所有页面并返回抽取结果（不入库），预览和正式采集共用。"""
+    """按规则抓取所有页面并返回抽取结果（不入库），预览和正式采集共用。
+
+    配置了入口页（entry）时，先从入口页找出各专场链接，再对每个专场按列表规则和翻页规则抓取；
+    max_pages 是每个列表（专场）的页数上限，max_entries 限制进入的专场数（预览、AI 验证时用）。
+    """
     runlog = runlog or RunLog()
     result = CrawlResult()
     fc = config.fetch
     limit = min(config.pagination.max_pages, max_pages or config.pagination.max_pages)
     if config.pagination.type == "none":
         limit = 1
-    queue = _page_requests(ctx, config) or [(fc.url or ctx.start_url, fc.body)]
-    seen: set[str] = set()
     interval = 1 / rate_limit if rate_limit > 0 else 0
-
-    key_field = config.list.unique_key or "url"
     item_keys: set[str] = set()
 
-    async with open_fetcher(ctx, fc, capture_json=bool(fc.capture)) as fetcher:
-        clicked: Fetched | None = None  # 点击翻页得到的下一页内容
-        click_started = 0.0
-        while (queue or clicked) and result.pages < limit:
-            started = click_started if clicked is not None else time.monotonic()
-            if clicked is not None:
-                fetched, url, body, clicked = clicked, clicked.url, None, None
-                source = f"点击「{config.pagination.selector}」"
-            else:
-                url, body = queue.pop(0)
-                key = f"{url}|{body}"
-                if key in seen:
-                    continue
-                seen.add(key)
-                if result.pages and interval:
-                    await asyncio.sleep(interval)
-                fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body, ctx.domain_interval)
-                source = url + (f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else "")
-            if fc.capture:
-                page = extract_captured(fetched.json_responses, fetched.url, config)
-            else:
-                page = extract_page(fetched.html, fetched.url, config)
-            result.pages += 1
-            new_items = []
-            for it in page.items:  # 同一页内也要去重（有的页面会重复请求同一个列表接口）
-                k = _item_key(it, key_field)
-                if k not in item_keys:
-                    item_keys.add(k)
-                    new_items.append(it)
-            result.items.extend(new_items)
-            result.errors.extend(page.errors)
-            runlog.info(
-                f"第 {result.pages} 页 {source} → HTTP {fetched.status}，{len(fetched.html)} 字节，"
-                f"抽取 {len(page.items)} 条（新 {len(new_items)} 条），耗时 {time.monotonic() - started:.1f}s"
-            )
-            for err in page.errors[:3]:
-                runlog.warn(err)
-            if not page.items:
-                if result.pages > 1:
-                    runlog.info("该页没有拍品，停止翻页")
-                else:
-                    # 首页就抽不到数据时保存页面片段，便于判断是改版、被拦截还是未登录
-                    from app.ai.html_compress import compress_html
+    if config.entry:
+        starts = await find_entry_links(ctx, config, runlog)
+        if max_entries:
+            starts = starts[:max_entries]
+        if not starts:
+            return result
+    else:
+        starts = [fc.url or ctx.start_url]
 
-                    snippet = fetched.html[:1500] if config.fetch.mode == "api" else compress_html(fetched.html, 1500)
-                    runlog.warn(f"页面片段（{fetched.url}）：{snippet}")
-                break
-            if result.pages > 1 and not new_items:
-                runlog.info("翻页后没有新的拍品（页面内容未变化），停止翻页")
-                break
-            if page.next_url and f"{page.next_url}|None" not in seen:
-                queue.append((page.next_url, None))
-            if config.pagination.type == "click" and result.pages < limit:
-                if not hasattr(fetcher, "click_next"):
-                    runlog.warn("点击翻页需要浏览器模式，请把抓取方式改为浏览器渲染")
-                    break
+    async with open_fetcher(ctx, fc, capture_json=bool(fc.capture)) as fetcher:
+        for i, start in enumerate(starts):
+            if config.entry:
+                runlog.info(f"专场 {i + 1}/{len(starts)}：{start}")
                 if interval:
                     await asyncio.sleep(interval)
-                await throttle(fetched.url, ctx.domain_interval)
-                click_started = time.monotonic()
-                clicked = await fetcher.click_next(config.pagination.selector or "")  # type: ignore[attr-defined]
-                if clicked is None:
-                    runlog.info(f"下一页按钮「{config.pagination.selector}」不存在或已禁用（已是最后一页），停止翻页")
-        if result.pages >= limit and (queue or clicked):
-            runlog.info(f"已达到最大页数 {limit}，停止翻页")
+            await _crawl_list(fetcher, ctx, config, start, limit, interval, runlog, result, item_keys)
 
         if with_detail and config.detail.enabled and result.items:
             await _crawl_details(fetcher, config, result, runlog, interval, known_keys, ctx.domain_interval)
     return result
+
+
+async def _crawl_list(
+    fetcher: Fetcher, ctx: FetchContext, config: RuleConfig, start: str, limit: int, interval: float,
+    runlog: RunLog, result: CrawlResult, item_keys: set[str],
+) -> None:
+    """从 start 开始抓取一个拍品列表的所有页面（含翻页），结果追加到 result。"""
+    fc = config.fetch
+    queue = _page_requests(start, config) or [(start, fc.body)]
+    seen: set[str] = set()
+    key_field = config.list.unique_key or "url"
+    pages = 0
+    clicked: Fetched | None = None  # 点击翻页得到的下一页内容
+    click_started = 0.0
+    while (queue or clicked) and pages < limit:
+        started = click_started if clicked is not None else time.monotonic()
+        if clicked is not None:
+            fetched, url, body, clicked = clicked, clicked.url, None, None
+            source = f"点击「{config.pagination.selector}」"
+        else:
+            url, body = queue.pop(0)
+            key = f"{url}|{body}"
+            if key in seen:
+                continue
+            seen.add(key)
+            if pages and interval:
+                await asyncio.sleep(interval)
+            fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body, ctx.domain_interval)
+            source = url + (f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else "")
+        if fc.capture:
+            page = extract_captured(fetched.json_responses, fetched.url, config)
+        else:
+            page = extract_page(fetched.html, fetched.url, config)
+        pages += 1
+        result.pages += 1
+        new_items = []
+        for it in page.items:  # 同一页内也要去重（有的页面会重复请求同一个列表接口）
+            k = _item_key(it, key_field)
+            if k not in item_keys:
+                item_keys.add(k)
+                new_items.append(it)
+        result.items.extend(new_items)
+        result.errors.extend(page.errors)
+        runlog.info(
+            f"第 {pages} 页 {source} → HTTP {fetched.status}，{len(fetched.html)} 字节，"
+            f"抽取 {len(page.items)} 条（新 {len(new_items)} 条），耗时 {time.monotonic() - started:.1f}s"
+        )
+        for err in page.errors[:3]:
+            runlog.warn(err)
+        if not page.items:
+            if pages > 1:
+                runlog.info("该页没有拍品，停止翻页")
+            elif not config.entry or not result.items:
+                # 首页就抽不到数据时保存页面片段，便于判断是改版、被拦截还是未登录（专场为空时不重复记录）
+                from app.ai.html_compress import compress_html
+
+                snippet = fetched.html[:1500] if config.fetch.mode == "api" else compress_html(fetched.html, 1500)
+                runlog.warn(f"页面片段（{fetched.url}）：{snippet}")
+            break
+        if pages > 1 and not new_items:
+            runlog.info("翻页后没有新的拍品（页面内容未变化），停止翻页")
+            break
+        if page.next_url and f"{page.next_url}|None" not in seen:
+            queue.append((page.next_url, None))
+        if config.pagination.type == "click" and pages < limit:
+            if not hasattr(fetcher, "click_next"):
+                runlog.warn("点击翻页需要浏览器模式，请把抓取方式改为浏览器渲染")
+                break
+            if interval:
+                await asyncio.sleep(interval)
+            await throttle(fetched.url, ctx.domain_interval)
+            click_started = time.monotonic()
+            clicked = await fetcher.click_next(config.pagination.selector or "")  # type: ignore[attr-defined]
+            if clicked is None:
+                runlog.info(f"下一页按钮「{config.pagination.selector}」不存在或已禁用（已是最后一页），停止翻页")
+    if pages >= limit and (queue or clicked):
+        runlog.info(f"已达到最大页数 {limit}，停止翻页")
 
 
 async def _crawl_details(

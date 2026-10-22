@@ -3,6 +3,7 @@
 AI 只负责产出声明式规则，日常采集仍由确定性的抽取器执行。
 """
 
+import dataclasses
 import json
 import logging
 import time
@@ -22,16 +23,17 @@ from app.ai.prompts import (
     TOOL_NAME,
     detail_message,
     detail_tool_schema,
+    event_page_message,
     first_message,
     repair_message,
     tool_schema,
 )
 from app.ai.providers import LLMError, LLMProvider, Message
-from app.crawler.extractor import PageResult, extract_captured, extract_detail, extract_json, extract_page
+from app.crawler.extractor import PageResult, entry_links, extract_captured, extract_detail, extract_json, extract_page
 from app.crawler.fetchers import FetchContext, open_fetcher
 from app.crawler.pipeline import jsonable
 from app.crawler.sniff import find_candidates
-from app.schemas.rule import DetailRule, FetchConfig, FieldRule, Pagination, RuleConfig
+from app.schemas.rule import DetailRule, EntryRule, FetchConfig, FieldRule, Pagination, RuleConfig
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +46,15 @@ class PageSnapshot:
     html: str
     screenshot: bytes | None = None
     json_responses: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class EntryFound:
+    """AI 判断起始页是专场列表，并给出了能匹配到链接的专场选择器。"""
+
+    entry: EntryRule
+    links: list[str]
+    explanation: str
 
 
 @dataclass
@@ -117,7 +128,10 @@ def evaluate(config: RuleConfig, snapshot: PageSnapshot) -> tuple[list[dict[str,
 
     critical = False
     if len(items) < 2:
-        problems.append(f"只匹配到 {len(items)} 个拍品容器，列表页通常有多个拍品，请检查 item_selector 是否过于具体。")
+        problems.append(
+            f"只匹配到 {len(items)} 个拍品容器，列表页通常有多个拍品，请检查 item_selector 是否过于具体。"
+            "如果页面列出的其实是拍卖会 / 专场（点进去才是拍品），请返回 page_kind=events 和 entry_link_selector。"
+        )
     if "title" not in keys:
         problems.append("缺少 title 字段。")
         critical = True
@@ -156,7 +170,7 @@ async def check_pagination(ctx: FetchContext, config: RuleConfig, fetch_mode: st
     runlog = RunLog()
     test = config.model_copy(update={"fetch": config.fetch.model_copy(update={"mode": config.fetch.mode or fetch_mode})})
     try:
-        res = await crawl(ctx, test, rate_limit=2, max_pages=2, runlog=runlog, with_detail=False)
+        res = await crawl(ctx, test, rate_limit=2, max_pages=2, runlog=runlog, with_detail=False, max_entries=1)
     except Exception as exc:
         return [f"按翻页规则抓取第 2 页失败：{type(exc).__name__}: {str(exc)[:200]}"]
     if res.pages >= 2:
@@ -169,9 +183,14 @@ async def check_pagination(ctx: FetchContext, config: RuleConfig, fetch_mode: st
 async def _list_stage(
     provider: LLMProvider, ctx: FetchContext, fetch_mode: str, snapshot: PageSnapshot, hint: str | None,
     max_rounds: int, previous_rule: dict[str, Any] | None, result: GenerationResult,
-) -> tuple | None:
+    entry: EntryFound | None = None,
+) -> tuple | EntryFound | None:
+    """生成拍品列表规则。entry 为空时 AI 可以判断起始页是专场列表（返回 EntryFound）；
+    否则 snapshot 是第一个专场页面，生成的规则会带上入口页配置，并从入口页实际验证。"""
     compressed = compress_html(snapshot.html)
     content = first_message(snapshot.url, compressed, hint, fetch_mode, summarize_json(snapshot.json_responses))
+    if entry:
+        content = event_page_message(ctx.start_url, entry.links) + "\n\n" + content
     if previous_rule:
         content += "\n\n该站点原有规则已失效（抽取不到数据），供参考：\n" + json.dumps(previous_rule, ensure_ascii=False)
     messages = [Message("user", content, [snapshot.screenshot] if snapshot.screenshot else [])]
@@ -187,6 +206,15 @@ async def _list_stage(
         raw_rule = llm.data.get("rule", llm.data)
         explanation = str(llm.data.get("explanation", ""))
         missing = [str(m) for m in (llm.data.get("missing_fields") or []) if str(m).strip()]
+        if llm.data.get("page_kind") == "events":
+            found = _check_entry(snapshot, str(llm.data.get("entry_link_selector") or "").strip(), explanation)
+            if isinstance(found, EntryFound) and entry is None:
+                return found
+            result.problems = [found if isinstance(found, str) else "当前页面已经是专场页面，请为其中的拍品列表生成规则（page_kind=lots）。"]
+            messages.append(Message("user", repair_message(result.problems, [])))
+            continue
+        if entry and isinstance(raw_rule, dict):
+            raw_rule = {**raw_rule, "entry": entry.entry.model_dump()}
         try:
             config = RuleConfig.model_validate(raw_rule)
         except ValidationError as exc:
@@ -209,6 +237,19 @@ async def _list_stage(
         if round_no < max_rounds:
             messages.append(Message("user", repair_message(problems, [{k: jsonable(v) for k, v in it.items()} for it in items])))
     return best
+
+
+def _check_entry(snapshot: PageSnapshot, selector: str, explanation: str) -> EntryFound | str:
+    if not selector:
+        return "page_kind=events 时需要提供 entry_link_selector（匹配各专场链接的 CSS 选择器）。"
+    try:
+        entry = EntryRule(link_selector=selector)
+        links = entry_links(snapshot.html, snapshot.url, entry)
+    except Exception as exc:
+        return f"entry_link_selector `{selector}` 无效：{str(exc)[:200]}"
+    if not links:
+        return f"entry_link_selector `{selector}` 在页面中没有匹配到带 href 的专场链接，请检查选择器（应指向 a 元素）。"
+    return EntryFound(entry, links, explanation)
 
 
 async def fetch_detail_pages(ctx: FetchContext, fetch_mode: str, urls: list[str]) -> list[PageSnapshot]:
@@ -307,7 +348,18 @@ async def generate_rule(
         snapshot = await capture_page(ctx, fetch_mode, provider.config.supports_vision)
 
     best = await _list_stage(provider, ctx, fetch_mode, snapshot, hint, max_rounds, previous_rule, result)
-    if best:
+    entry_note = ""
+    if isinstance(best, EntryFound):
+        # 起始页是专场列表：进入第一个专场生成拍品规则，再带上入口页配置从起始页完整验证
+        found = best
+        sub_snapshot = await capture_page(dataclasses.replace(ctx, start_url=found.links[0]), fetch_mode, provider.config.supports_vision)
+        entry_note = (
+            f"【入口页】起始页是拍卖会 / 专场列表，找到 {len(found.links)} 个专场（选择器 `{found.entry.link_selector}`），"
+            f"采集时逐个进入专场抓取拍品；以下规则基于第一个专场 {found.links[0]} 生成。"
+            + (f"\n{found.explanation}" if found.explanation else "") + "\n\n【专场内拍品】"
+        )
+        best = await _list_stage(provider, ctx, fetch_mode, sub_snapshot, hint, max_rounds, None, result, entry=found)
+    if isinstance(best, tuple):
         _, config, items, explanation, problems, acceptable, missing = best
         pagination_failed = any(p.startswith(("翻页没有生效", "按翻页规则")) for p in problems)
         if pagination_failed and acceptable:
@@ -315,7 +367,7 @@ async def generate_rule(
             config = config.model_copy(update={"pagination": Pagination()})
             problems = [p for p in problems if not p.startswith(("翻页没有生效", "按翻页规则"))]
             problems.append("翻页未能自动配置成功，已设为只抓第一页；可用可视化选取的“选择下一页”或手动配置。")
-        result.rule, result.explanation, result.problems, result.ok = config, explanation, problems, acceptable
+        result.rule, result.explanation, result.problems, result.ok = config, entry_note + explanation, problems, acceptable
         result.missing_fields = missing
         result.items = [{k: jsonable(v) for k, v in it.items()} for it in items]
 
