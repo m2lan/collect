@@ -16,7 +16,8 @@
 - 可视化选取：在页面快照上点击拍品、字段和"下一页"
 - 接口嗅探：自动找出页面背后返回拍品列表的 JSON 接口并猜测字段
 - 手写 JSON / 从规则模板导入
-- 支持翻页（下一页链接 / URL 模板 / 页码参数）、详情页补充字段
+- 支持翻页（下一页链接 / 点击 JS 翻页按钮 / URL 模板 / 页码参数 / 滚动加载）、详情页补充字段
+- 保证金、评估价等只在详情页的字段：AI 生成时勾选"同时分析详情页"（或在补充要求中写明，AI 发现列表页没有时会自动分析详情页）
 
 **采集与监控**
 - 手动采集、定时采集（cron）、盯价（只刷新进行中拍品的价格）
@@ -99,7 +100,7 @@ npm run dev                            # http://localhost:5173，/api 代理到 
       { "key": "lot_no", "type": "regex", "pattern": "lot/(\\d+)", "from": "url" }
     ]
   },
-  "pagination": { "type": "next_link", "selector": "a.next", "max_pages": 10 },
+  "pagination": { "type": "next_link", "selector": "a.next", "max_pages": 10 },  // JS 按钮翻页用 "click"
   "detail": {
     "enabled": false, "url_field": "url", "max_items": 50, "only_new": true,
     "fields": [{ "key": "estimate", "selector": ".estimate", "transform": ["trim"] }]
@@ -109,4 +110,6 @@ npm run dev                            # http://localhost:5173，/api 代理到 
 
 - 标准字段 title、url、image、current_price、start_price、deal_price、bid_count、status、start_time、end_time 存入对应列，其余字段存入扩展信息（导出时展开为列）。
 - transform：`trim`、`price`（解析金额与币种，支持"万/亿"）、`number`、`int`、`datetime`、`absolute_url`、`status`、`lower`、`{"name": "regex_replace", "pattern": "...", "repl": "..."}`。
+- 翻页：`next_link`（带 href 的下一页链接）、`click`（点击"下一页"按钮，浏览器模式）、`url_template`（`?page={page}`）、`page_param`（接口页码参数）；无限滚动用 `fetch.scroll: true`。翻页后没有新拍品会自动停止。
+- 详情页字段：`detail.fields` 的选择器相对整个详情页；"保证金：¥5,000"这类信息推荐用 `{"type": "regex", "pattern": "保证金[：:\\s]*([¥￥]?[\\d,.]+)", "transform": ["price"]}` 从整页文本匹配。
 - 接口模式：`fetch` 设 `"mode": "api", "url": "...", "method": "GET|POST", "body": {...}`，`item_selector` 如 `$.data.list[*]`，字段 `type: "jsonpath"`，翻页用 `url_template` 或 `{"type": "page_param", "param": "pageNo"}`。

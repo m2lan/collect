@@ -31,7 +31,8 @@ async def auto_repair(source_id: int) -> int | None:
         mode = ((old.config.get("fetch") or {}).get("mode") if old else None) or source.fetch_mode
         try:
             gen, result = await service.run_generation(
-                session, ctx, mode, source_id=source_id, trigger="repair", previous_rule=old.config if old else None
+                session, ctx, mode, source_id=source_id, trigger="repair", previous_rule=old.config if old else None,
+                analyze_detail=bool(old and (old.config.get("detail") or {}).get("enabled")),
             )
         except HTTPException as exc:
             await notify(session, f"AI 自动修复失败：{source.name}", str(exc.detail))

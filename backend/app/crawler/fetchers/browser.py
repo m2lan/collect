@@ -159,6 +159,35 @@ class BrowserFetcher:
             json_responses=list(self._json),
         )
 
+    async def click_next(self, selector: str) -> Fetched | None:
+        """点击"下一页"按钮（适用于没有真实链接、由 JS 翻页的网站），返回翻页后的页面；按钮不存在或不可用时返回 None。"""
+        assert self.page
+        cfg = self.fetch_config
+        timeout = cfg.timeout * 1000
+        button = self.page.locator(selector).first
+        try:
+            if not await button.count() or not await button.is_visible():
+                return None
+            cls = (await button.get_attribute("class") or "").lower()
+            if await button.is_disabled() or "disabled" in cls.split() or "disable" in cls.split() or await button.get_attribute("aria-disabled") == "true":
+                return None
+            self._json = []
+            await button.scroll_into_view_if_needed(timeout=timeout)
+            await button.click(timeout=timeout)
+        except Exception:
+            return None
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=min(timeout, 15_000))
+        except Exception:
+            pass  # 长连接页面可能永远不会 networkidle
+        if cfg.wait_for:
+            try:
+                await self.page.wait_for_selector(cfg.wait_for, timeout=timeout)
+            except Exception:
+                pass
+        await self.page.wait_for_timeout(cfg.wait_ms or 800)
+        return Fetched(url=self.page.url, status=200, html=await self.page.content(), json_responses=list(self._json))
+
     async def fetch(self, url: str, method: str = "GET", body: dict[str, Any] | None = None) -> Fetched:
         fetched = await self._load(url)
         if self.ctx.needs_login(fetched):

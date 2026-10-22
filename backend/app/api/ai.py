@@ -137,7 +137,8 @@ async def generate(body: GenerateIn, session: SessionDep) -> GenerateOut:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "站点不存在")
     ctx = await build_context(session, body, source)
     gen, result = await service.run_generation(
-        session, ctx, body.fetch_mode, hint=body.hint, source_id=body.source_id, provider_id=body.provider_id
+        session, ctx, body.fetch_mode, hint=body.hint, source_id=body.source_id, provider_id=body.provider_id,
+        analyze_detail=body.analyze_detail,
     )
     version = None
     if body.apply and source and result.ok:
@@ -147,7 +148,7 @@ async def generate(body: GenerateIn, session: SessionDep) -> GenerateOut:
         generation_id=gen.id, ok=result.ok, rule=gen.result_rule, explanation=result.explanation,
         problems=result.problems, items=result.items[:100], count=len(result.items), rounds=result.rounds,
         prompt_tokens=result.prompt_tokens, completion_tokens=result.completion_tokens,
-        duration_ms=result.duration_ms, rule_version=version,
+        duration_ms=result.duration_ms, rule_version=version, missing_fields=result.missing_fields,
     )
 
 

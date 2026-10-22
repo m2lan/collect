@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import random
 import time
@@ -78,6 +79,13 @@ async def fetch_with_retry(
     raise AssertionError("unreachable")
 
 
+def _item_key(item: dict[str, Any], key_field: str) -> str:
+    value = item.get(key_field)
+    if value is None:
+        value = json.dumps({k: str(v) for k, v in item.items()}, sort_keys=True, ensure_ascii=False)
+    return str(value)
+
+
 def _page_requests(ctx: FetchContext, config: RuleConfig) -> list[tuple[str, dict[str, Any] | None]] | None:
     """能预先算出的分页请求列表（url, POST body）；next_link 等需逐页发现的返回 None。"""
     fc, pg = config.fetch, config.pagination
@@ -110,25 +118,35 @@ async def crawl(
     seen: set[str] = set()
     interval = 1 / rate_limit if rate_limit > 0 else 0
 
+    key_field = config.list.unique_key or "url"
+    item_keys: set[str] = set()
+
     async with open_fetcher(ctx, fc) as fetcher:
-        while queue and result.pages < limit:
-            url, body = queue.pop(0)
-            key = f"{url}|{body}"
-            if key in seen:
-                continue
-            seen.add(key)
-            if result.pages and interval:
-                await asyncio.sleep(interval)
+        clicked: Fetched | None = None  # 点击翻页得到的下一页内容
+        while (queue or clicked) and result.pages < limit:
             started = time.monotonic()
-            fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body)
+            if clicked is not None:
+                fetched, url, body, clicked = clicked, clicked.url, None, None
+                source = f"点击「{config.pagination.selector}」"
+            else:
+                url, body = queue.pop(0)
+                key = f"{url}|{body}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                if result.pages and interval:
+                    await asyncio.sleep(interval)
+                fetched = await fetch_with_retry(fetcher, url, runlog, fc.method, body)
+                source = url + (f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else "")
             page = extract_page(fetched.html, fetched.url, config)
             result.pages += 1
-            result.items.extend(page.items)
+            new_items = [it for it in page.items if _item_key(it, key_field) not in item_keys]
+            item_keys.update(_item_key(it, key_field) for it in page.items)
+            result.items.extend(new_items)
             result.errors.extend(page.errors)
-            page_no = f"（页码 {body.get(config.pagination.param)}）" if body and config.pagination.param in body else ""
             runlog.info(
-                f"第 {result.pages} 页 {url}{page_no} → HTTP {fetched.status}，{len(fetched.html)} 字节，"
-                f"抽取 {len(page.items)} 条，耗时 {time.monotonic() - started:.1f}s"
+                f"第 {result.pages} 页 {source} → HTTP {fetched.status}，{len(fetched.html)} 字节，"
+                f"抽取 {len(page.items)} 条（新 {len(new_items)} 条），耗时 {time.monotonic() - started:.1f}s"
             )
             for err in page.errors[:3]:
                 runlog.warn(err)
@@ -142,9 +160,21 @@ async def crawl(
                     snippet = fetched.html[:1500] if config.fetch.mode == "api" else compress_html(fetched.html, 1500)
                     runlog.warn(f"页面片段（{fetched.url}）：{snippet}")
                 break
+            if result.pages > 1 and not new_items:
+                runlog.info("翻页后没有新的拍品（页面内容未变化），停止翻页")
+                break
             if page.next_url and f"{page.next_url}|None" not in seen:
                 queue.append((page.next_url, None))
-        if result.pages >= limit and queue:
+            if config.pagination.type == "click" and result.pages < limit:
+                if not hasattr(fetcher, "click_next"):
+                    runlog.warn("点击翻页需要浏览器模式，请把抓取方式改为浏览器渲染")
+                    break
+                if interval:
+                    await asyncio.sleep(interval)
+                clicked = await fetcher.click_next(config.pagination.selector or "")  # type: ignore[attr-defined]
+                if clicked is None:
+                    runlog.info(f"下一页按钮「{config.pagination.selector}」不存在或已禁用（已是最后一页），停止翻页")
+        if result.pages >= limit and (queue or clicked):
             runlog.info(f"已达到最大页数 {limit}，停止翻页")
 
         if with_detail and config.detail.enabled and result.items:

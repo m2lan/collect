@@ -70,7 +70,10 @@
 
       <el-tab-pane label="采集规则" name="rule">
         <div v-if="aiAvailable" class="ai-bar">
-          <el-input v-model="aiHint" placeholder="给 AI 的补充要求（可选），如：还要抓保证金和围观人数" clearable />
+          <el-input v-model="aiHint" placeholder="给 AI 的补充要求（可选），如：还要抓保证金和评估价" clearable />
+          <el-tooltip content="保证金、评估价、拍品描述等通常只在详情页。勾选后 AI 会打开详情页生成详情字段规则；AI 发现列表页缺少你要求的字段时也会自动分析详情页" placement="top">
+            <el-checkbox v-model="aiDetail" border>同时分析详情页</el-checkbox>
+          </el-tooltip>
           <el-button type="warning" :loading="generating" @click="runAI">AI 生成规则</el-button>
         </div>
         <el-alert v-if="generating" type="info" :closable="false" style="margin-bottom: 8px"
@@ -78,6 +81,9 @@
         <el-alert v-if="aiResult" :type="aiResult.ok ? 'success' : 'warning'" :closable="false" style="margin-bottom: 8px"
           :title="aiResult.ok ? `AI 已生成规则（${aiResult.rounds} 轮，抽取到 ${aiResult.count} 条），保存后生效` : 'AI 未能生成完全可用的规则，以下是最佳结果，请检查后调整'">
           <div style="white-space: pre-wrap">{{ aiResult.explanation }}</div>
+          <div v-if="aiResult.rule?.detail?.enabled" style="margin-top: 4px">
+            已生成详情页规则：{{ aiResult.rule.detail.fields.map((f) => f.key).join('、') }}（每次采集打开新拍品的详情页补充这些字段）
+          </div>
           <ul v-if="aiResult.problems.length" style="margin: 4px 0 0; padding-left: 18px">
             <li v-for="p in aiResult.problems" :key="p">{{ p }}</li>
           </ul>
@@ -108,7 +114,8 @@
               <p><b>fields[]</b>：key 为字段名；标准字段 title / url / image / current_price / start_price / deal_price / bid_count / status / start_time / end_time 会进入对应列，其余字段进入"扩展信息"。</p>
               <p>type：css / xpath / regex；selector 相对拍品容器，留空表示容器本身；attr：text / html / 属性名（href、src、data-*）。</p>
               <p>transform：trim、price（解析金额与币种，支持"万"）、number、int、datetime、absolute_url、status（进行中/已成交/流拍…）、lower，或 {"name":"regex_replace","pattern":"..","repl":".."}。</p>
-              <p><b>unique_key</b>：用于去重的字段，默认 url。<b>pagination</b>：none / next_link（selector）/ url_template（template 含 {page}）。</p>
+              <p><b>unique_key</b>：用于去重的字段，默认 url。</p>
+              <p><b>pagination</b>：none / next_link（"下一页"链接的 selector）/ url_template（template 含 {page}）/ click（"下一页"按钮的 selector，适用于点击后由 JS 加载的网站，需浏览器渲染）。无限滚动加载用 fetch.scroll=true。</p>
               <p><b>fetch</b>：浏览器模式下可设置 wait_for（等待元素）、scroll（滚动加载）、wait_ms。</p>
               <p><b>接口模式</b>：fetch.mode 设为 api，fetch.url / method / body 指定接口；item_selector_type 为 jsonpath（如 $.data.list[*]），字段 type 为 jsonpath（如 $.title）；翻页用 url_template 或 page_param（param 为页码参数名）。推荐用"嗅探接口"自动生成。</p>
               <p><b>detail</b>：{"enabled": true, "url_field": "url", "fields": [...], "max_items": 50, "only_new": true} 打开每个拍品的详情页补充字段（选择器相对整个详情页），详情页的值优先；盯价任务也通过详情页刷新价格。</p>
@@ -226,6 +233,7 @@ const previewing = ref(false)
 const previewResult = ref(null)
 const aiAvailable = ref(false)
 const aiHint = ref('')
+const aiDetail = ref(false)
 const generating = ref(false)
 const aiResult = ref(null)
 const generatedText = ref(null)
@@ -332,7 +340,7 @@ async function runAI() {
   generating.value = true
   aiResult.value = null
   try {
-    applyAIResult(await aiGenerate({ ...body, hint: aiHint.value || null, source_id: props.source?.id }))
+    applyAIResult(await aiGenerate({ ...body, hint: aiHint.value || null, source_id: props.source?.id, analyze_detail: aiDetail.value }))
   } finally {
     generating.value = false
   }
@@ -432,5 +440,5 @@ async function logout() {
 
 <style scoped>
 .help p { margin: 4px 0; }
-.ai-bar { display: flex; gap: 8px; margin-bottom: 8px; }
+.ai-bar { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 </style>

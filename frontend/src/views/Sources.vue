@@ -67,7 +67,11 @@
           <el-radio value="static">静态请求</el-radio>
         </el-radio-group>
       </el-form-item>
-      <el-form-item label="补充要求"><el-input v-model="quick.hint" type="textarea" :rows="2" placeholder="可选，如：只抓已成交的拍品，还要抓评估价" /></el-form-item>
+      <el-form-item label="补充要求"><el-input v-model="quick.hint" type="textarea" :rows="2" placeholder="可选，如：只抓已成交的拍品，还要抓保证金和评估价" /></el-form-item>
+      <el-form-item label="详情页">
+        <el-checkbox v-model="quick.analyze_detail">同时分析详情页</el-checkbox>
+        <div class="muted">保证金、评估价等只在详情页的字段需要勾选（AI 发现列表页缺少你要求的字段时也会自动分析）</div>
+      </el-form-item>
       <div class="muted">需要登录的站点请使用"新增站点"配置登录方式后，再在"采集规则"中使用 AI 生成。</div>
       <el-alert v-if="quickLoading" type="info" :closable="false" style="margin-top: 12px" title="AI 正在分析页面并生成规则，通常需要 20 秒到 2 分钟…" />
     </el-form>
@@ -101,7 +105,7 @@ const quick = ref({})
 const aiDraft = ref(null)
 
 function openQuick() {
-  quick.value = { start_url: '', name: '', fetch_mode: 'browser', hint: '' }
+  quick.value = { start_url: '', name: '', fetch_mode: 'browser', hint: '', analyze_detail: false }
   quickVisible.value = true
 }
 
@@ -117,7 +121,10 @@ async function submitQuick() {
     const source = await createSource({ name, start_url: q.start_url, fetch_mode: q.fetch_mode })
     let result = null
     try {
-      result = await aiGenerate({ source_id: source.id, start_url: q.start_url, fetch_mode: q.fetch_mode, hint: q.hint || null, apply: true })
+      result = await aiGenerate({
+        source_id: source.id, start_url: q.start_url, fetch_mode: q.fetch_mode, hint: q.hint || null,
+        analyze_detail: q.analyze_detail, apply: true,
+      })
     } catch {
       // 错误已提示；站点已创建，可在编辑中继续调整
     }

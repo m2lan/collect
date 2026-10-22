@@ -50,7 +50,15 @@
         </div>
 
         <h4>翻页</h4>
-        <el-input v-model="nextSelector" size="small" placeholder='切换到"选择下一页"后点击页面上的下一页链接' clearable />
+        <el-input v-model="nextSelector" size="small" placeholder='切换到"选择下一页"后点击页面上的下一页链接' clearable>
+          <template #prepend>
+            <el-select v-model="nextType" size="small" style="width: 100px">
+              <el-option label="链接" value="next_link" />
+              <el-option label="点击按钮" value="click" />
+            </el-select>
+          </template>
+        </el-input>
+        <div v-if="nextType === 'click'" class="muted">该"下一页"没有真实链接，将通过点击按钮翻页（需要浏览器渲染模式）</div>
         <div class="row">
           <span class="muted">最多</span>
           <el-input-number v-model="maxPages" :min="1" :max="500" size="small" />
@@ -105,6 +113,7 @@ const chain = ref([])
 const chainIndex = ref(0)
 const fields = ref([])
 const nextSelector = ref('')
+const nextType = ref('next_link')
 const maxPages = ref(5)
 let doc = null
 let hovered = null
@@ -118,6 +127,7 @@ async function load() {
   itemCount.value = 0
   chain.value = []
   nextSelector.value = props.baseRule?.pagination?.selector || ''
+  nextType.value = props.baseRule?.pagination?.type === 'click' ? 'click' : 'next_link'
   maxPages.value = props.baseRule?.pagination?.max_pages || 5
   html.value = ''
   loading.value = true
@@ -315,7 +325,10 @@ function refreshSamples() {
 }
 
 function pickNext(target) {
-  const a = target.closest('a') || target
+  const a = target.closest('a') || target.closest('button, [role=button]') || target
+  const href = (a.getAttribute('href') || '').trim().toLowerCase()
+  // 没有真实链接（按钮、javascript:、#）时需要点击翻页
+  nextType.value = a.tagName === 'A' && href && !href.startsWith('javascript') && href !== '#' ? 'next_link' : 'click'
   clearMarks('__pk-next')
   let sel = simpleSel(a)
   if (count(sel) !== 1) {
@@ -351,9 +364,10 @@ function finish() {
       fields: fields.value.map(({ key, selector, attr, transform }) => ({ key, type: 'css', selector, attr, transform })),
     },
     pagination: nextSelector.value
-      ? { type: 'next_link', selector: nextSelector.value, max_pages: maxPages.value }
+      ? { type: nextType.value, selector: nextSelector.value, max_pages: maxPages.value }
       : base.pagination?.type === 'url_template' ? base.pagination : { type: 'none' },
   }
+  if (nextSelector.value && nextType.value === 'click') rule.fetch = { ...rule.fetch, mode: 'browser' }
   emit('done', rule)
   emit('update:modelValue', false)
 }

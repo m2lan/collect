@@ -283,6 +283,7 @@ class GenerateIn(BaseModel):
     hint: str | None = Field(None, max_length=2000)
     provider_id: int | None = None
     apply: bool = False
+    analyze_detail: bool = Field(False, description="同时打开详情页生成详情字段规则（AI 判断列表页缺少所需字段时也会自动进行）")
 
 
 class GenerateOut(BaseModel):
@@ -298,6 +299,7 @@ class GenerateOut(BaseModel):
     completion_tokens: int
     duration_ms: int
     rule_version: int | None = None
+    missing_fields: list[str] = Field(default_factory=list)
 
 
 class GenerationOut(BaseModel):

@@ -83,8 +83,8 @@ class ListRule(BaseModel):
 
 
 class Pagination(BaseModel):
-    type: Literal["none", "next_link", "url_template", "page_param"] = "none"
-    selector: str | None = Field(None, description="next_link：下一页链接的 CSS 选择器")
+    type: Literal["none", "next_link", "url_template", "page_param", "click"] = "none"
+    selector: str | None = Field(None, description="next_link：下一页链接的 CSS 选择器；click：下一页按钮的 CSS 选择器（浏览器模式）")
     template: str | None = Field(None, description="url_template：含 {page} 占位符的 URL")
     param: str | None = Field(None, description="page_param：页码参数名（GET 为查询参数，POST 为请求体字段）")
     start: int = 1
@@ -92,8 +92,8 @@ class Pagination(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "Pagination":
-        if self.type == "next_link" and not self.selector:
-            raise ValueError("next_link 翻页需要 selector")
+        if self.type in ("next_link", "click") and not self.selector:
+            raise ValueError(f"{self.type} 翻页需要 selector")
         if self.type == "url_template" and (not self.template or "{page}" not in self.template):
             raise ValueError("url_template 翻页需要包含 {page} 的 template")
         if self.type == "page_param" and not self.param:
@@ -127,8 +127,10 @@ class RuleConfig(BaseModel):
                 raise ValueError(f"api 模式下字段 {f.key} 需使用 jsonpath 或 regex")
             if not is_json and f.type == "jsonpath":
                 raise ValueError(f"字段 {f.key}: jsonpath 仅用于 api 模式")
-        if self.pagination.type == "next_link" and is_json:
-            raise ValueError("api 模式不支持 next_link 翻页，请使用 url_template 或 page_param")
+        if self.pagination.type in ("next_link", "click") and is_json:
+            raise ValueError("api 模式不支持 next_link / click 翻页，请使用 url_template 或 page_param")
+        if self.pagination.type == "click" and self.fetch.mode == "static":
+            raise ValueError("click 翻页需要浏览器模式（fetch.mode 为 browser 或留空并在站点中选择浏览器渲染）")
         if self.detail.enabled and any(f.type == "jsonpath" for f in self.detail.fields):
             raise ValueError("详情页字段不支持 jsonpath")
         return self

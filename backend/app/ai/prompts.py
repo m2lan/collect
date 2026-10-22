@@ -20,8 +20,9 @@ SYSTEM_PROMPT = """你是网页数据采集专家，负责为拍卖平台的拍�
     或 {"name":"regex_replace","pattern":"...","repl":"..."}
 - list.unique_key：用于去重的字段名，优先 url 或拍品编号。
 - pagination：type=none / next_link（selector 为“下一页”链接的 CSS 选择器）/ url_template（template 含 {page}，start 起始页码，max_pages）
-  / page_param（param 为页码参数名：GET 时作为查询参数，POST 时作为请求体字段）。
-- detail：详情页补充字段，一般保持 enabled=false（你看不到详情页）。
+  / page_param（param 为页码参数名：GET 时作为查询参数，POST 时作为请求体字段）
+  / click（selector 为“下一页”按钮的 CSS 选择器，用于没有真实链接、点击后由 JS 加载下一页的网站，仅浏览器模式）。
+- detail：保持 enabled=false。详情页规则会在下一步由你看着详情页单独生成。
 
 ## 接口模式（api）
 如果提供了“捕获到的 JSON 接口”且其中包含完整的拍品列表，优先生成 api 模式规则（比解析 HTML 稳定）：
@@ -39,8 +40,16 @@ status 状态、start_time 开始时间、end_time 结束时间。其他有价�
 2. 字段选择器必须相对于拍品容器，且在每个拍品中都能匹配。
 3. 链接和图片加 absolute_url；价格加 price；数字加 int；时间加 datetime；状态加 status。懒加载图片优先取 data-src / data-original。
 4. 文本类字段加 trim。只抽取页面上真实存在的信息，不要臆造选择器。
-5. 如果页面存在“下一页”链接或明显的页码 URL 规律，配置 pagination，max_pages 默认 5。
-6. explanation 用中文简要说明 item_selector 的依据和每个字段的选择理由。
+5. 翻页（max_pages 默认 5）：
+   - 有带真实 href 的“下一页”链接 → next_link；
+   - 页码链接的 href 呈规律（如 ?page=2、/list_2.html）→ 优先 url_template；
+   - “下一页”是 button、href 为 javascript:/# 或没有 href → click（需要浏览器模式）；
+   - 滚动到底部自动加载更多 → fetch.scroll=true，pagination.type=none；
+   - 页面上没有任何翻页控件 → none。
+   系统会实际翻到第 2 页验证，失败会把原因反馈给你。
+6. explanation 用中文简要说明 item_selector 的依据、每个字段和翻页方式的选择理由。
+7. missing_fields：管理员要求抓取、但列表页上确实不存在的字段（如保证金、评估价、拍品描述常常只在详情页），
+   用标准或自定义 key 列出（如 ["deposit", "estimate"]）。不要为这些字段臆造列表页选择器，系统会打开详情页让你另行生成。
 """
 
 
@@ -66,9 +75,55 @@ def tool_schema() -> dict[str, Any]:
         "properties": {
             "explanation": {"type": "string", "description": "中文说明：容器与各字段的选择依据"},
             "rule": _inline_refs(RuleConfig.model_json_schema(by_alias=True)),
+            "missing_fields": {
+                "type": "array", "items": {"type": "string"},
+                "description": "管理员要求但列表页上没有、需要到详情页抓取的字段 key",
+            },
         },
         "required": ["explanation", "rule"],
     }
+
+
+DETAIL_TOOL_NAME = "submit_detail_rule"
+DETAIL_TOOL_DESCRIPTION = "提交拍品详情页的字段抽取规则"
+
+DETAIL_SYSTEM_PROMPT = """你是网页数据采集专家。现在给你的是某个拍卖平台的“拍品详情页”（精简后的 HTML），
+请为指定字段编写抽取规则，规则会套用到同一平台的所有拍品详情页上。
+
+## 字段规则 {key, type, selector, attr, pattern, from, transform}
+- type=css/xpath 时 selector 相对整个页面（不是某个容器），attr 为 text / html / 属性名
+- type=regex 时用带一个捕获组的 pattern 从 from 指定的字段取值；from 为空则从整页文本中匹配
+- transform 同列表规则：trim、price、number、int、datetime、absolute_url、status、lower、{"name":"regex_replace",...}
+
+## 要求
+1. “标签：值”形式的信息（如“保证金：¥5,000”“评估价 RMB 8-12万”）结构常不稳定，推荐：
+   - 有独立元素包着值时用 css/xpath，如 xpath `//*[contains(text(),'保证金')]/following-sibling::*[1]`；
+   - 否则用 regex 从整页文本匹配，如 pattern `保证金[：:\\s]*([¥￥$]?[\\d,.]+\\s*万?元?)`，再加 price 转换。
+2. 选择器要在其他拍品的详情页上同样适用，避免依赖具体拍品的文字或编号。
+3. 金额加 price，时间加 datetime，数字加 int，文本加 trim。
+4. explanation 用中文说明每个字段的定位依据。如果某字段在详情页上也确实不存在，不要输出该字段，并在 explanation 中说明。
+"""
+
+
+def detail_tool_schema() -> dict[str, Any]:
+    field_schema = _inline_refs(RuleConfig.model_json_schema(by_alias=True))["properties"]["list"]["properties"]["fields"]
+    return {
+        "type": "object",
+        "properties": {
+            "explanation": {"type": "string", "description": "中文说明各字段的定位依据"},
+            "fields": field_schema,
+        },
+        "required": ["explanation", "fields"],
+    }
+
+
+def detail_message(url: str, compressed_html: str, wanted: list[str], hint: str | None) -> str:
+    parts = [f"详情页 URL：{url}", f"需要抓取的字段：{', '.join(wanted) if wanted else '（见管理员要求）'}"]
+    if hint:
+        parts.append(f"管理员的原始要求：{hint}")
+    parts.append("精简后的详情页 HTML：\n" + compressed_html)
+    parts.append(f"请调用 {DETAIL_TOOL_NAME} 提交字段规则。")
+    return "\n\n".join(parts)
 
 
 def first_message(url: str, compressed_html: str, hint: str | None, fetch_mode: str, json_samples: list[dict] | None) -> str:
