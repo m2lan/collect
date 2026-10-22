@@ -189,3 +189,18 @@ async def tag(body: TagIn, session: SessionDep) -> dict:
 
     await service.ensure_ai_available(session)
     return await tag_lots(session, body.lot_ids, body.limit)
+
+
+class AskIn(BaseModel):
+    question: str = Field(min_length=2, max_length=500)
+
+
+@router.post("/ask")
+async def ask_data(body: AskIn, session: SessionDep) -> dict:
+    """自然语言查数据：如“近三个月青花瓷成交均价是多少”。"""
+    from app.ai.ask import ask
+
+    try:
+        return await ask(session, body.question)
+    except LLMError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"AI 调用失败：{exc}") from exc
